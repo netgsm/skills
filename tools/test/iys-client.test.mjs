@@ -160,3 +160,42 @@ test('baseUrl ve brandCode zorunludur', () => {
   assert.throws(() => new IysClient({ baseUrl: '', username: 'u', password: 'p', brandCode: 1 }), /baseUrl/);
   assert.throws(() => new IysClient({ baseUrl: BASE, username: 'u', password: 'p', brandCode: 0 }), /brandCode/);
 });
+
+test('refresh beklenirken başka bir istek 401 alırsa çökmez, iki istek de yeni token ile tamamlanır', async () => {
+  let t = 0;
+  let tokenN = 0;
+  let apiCalls = 0;
+  const calls = [];
+  let releaseApi;
+  let releaseRefresh;
+  const apiGate = new Promise((r) => { releaseApi = r; });
+  const refreshGate = new Promise((r) => { releaseRefresh = r; });
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+  const fakeFetch = async (input, init = {}) => {
+    const path = new URL(String(input)).pathname;
+    calls.push(path);
+    if (path === '/auth/v3/token') {
+      tokenN++;
+      return Response.json({ ...TOKEN, access_token: `acc-${tokenN}`, expires_in: 3600 });
+    }
+    if (path === '/auth/v3/token/refresh') { await refreshGate; return Response.json({}, { status: 503 }); }
+    apiCalls++;
+    if (apiCalls === 1) { await apiGate; return Response.json(err(53, 'Token has expired'), { status: 401 }); }
+    return Response.json(ok({ uid: init.headers.Authorization }));
+  };
+  const client = new IysClient({
+    baseUrl: BASE, username: 'u', password: 'p', brandCode: 123456, fetch: fakeFetch, now: () => t, sleep: async () => {},
+  });
+  const first = client.saveWebhook('https://example.com/a'); // acc-1 ile gider, yanıtı bekletilir
+  while (apiCalls < 1) await tick();
+  t = 3600_000 - 60_000; // yenileme payının içinde
+  const second = client.saveWebhook('https://example.com/b'); // refresh başlar, bekletilir
+  while (!calls.includes('/auth/v3/token/refresh')) await tick();
+  releaseApi(); // ilk istek 401 alır → invalidate('acc-1'), bekleyen yenilemeye katılır
+  await tick();
+  releaseRefresh(); // refresh 503: eski token geçersiz kılındığı için yeniden giriş
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.uid, 'Bearer acc-2');
+  assert.equal(b.uid, 'Bearer acc-2');
+  assert.deepEqual(calls.filter((p) => p.startsWith('/auth')), ['/auth/v3/token', '/auth/v3/token/refresh', '/auth/v3/token']);
+});

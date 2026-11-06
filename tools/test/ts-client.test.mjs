@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { createMockServer } from '../../packages/sms-mock/src/server.mjs';
 import { createClock } from '../../packages/sms-mock/src/clock.mjs';
 import {
-  NetgsmClient, NetgsmApiError, parseCredit, findBalance, webhookToReport, webhookOperator,
+  NetgsmClient, NetgsmApiError, NetgsmTokenManager, parseCredit, findBalance, webhookToReport, webhookOperator,
 } from '../../plugins/sms-skills/skills/netgsm-sms/references/examples/netgsm-client.ts';
 
 const USERNAME = '8500000000';
@@ -466,4 +466,30 @@ test('webhookToReport: mock\'un gönderdiği rapor webhook gövdesini çevirir',
   } finally {
     await server.close();
   }
+});
+
+test('refresh beklenirken invalidate() çağrılırsa çökmez, yeniden giriş yapar', async () => {
+  let t = 0;
+  const calls = [];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const token = (n) => Response.json({ access_token: `a${n}`, refresh_token: '00000000-0000-4000-8000-000000000000', expires_in: 3600 });
+  const fakeFetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    calls.push(path);
+    if (calls.length === 1) return token(1);
+    if (path.endsWith('/refresh')) { await gate; return Response.json({}, { status: 503 }); }
+    return token(2);
+  };
+  const manager = new NetgsmTokenManager({
+    baseUrl: 'https://example.com', username: 'u', password: 'p', scope: 'sms', fetch: fakeFetch, now: () => t,
+  });
+  assert.equal(await manager.get(), 'a1');
+  t = 3600_000 - 60_000; // yenileme payının içinde
+  const pending = manager.get();
+  await new Promise((r) => setImmediate(r));
+  manager.invalidate('a1'); // ör. başka bir istek 401 aldı
+  release();
+  assert.equal(await pending, 'a2');
+  assert.deepEqual(calls, ['/auth/v3/token', '/auth/v3/token/refresh', '/auth/v3/token']);
 });
