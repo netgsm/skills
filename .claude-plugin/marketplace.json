@@ -1,12 +1,14 @@
 {
   "name": "netgsm-agent-skills",
-  "description": "Agent skill collection for Netgsm services: SMS, İYS and balance API integration experts and a local SMS mock server.",
-  "owner": { "name": "Netgsm" },
+  "description": "Official Netgsm agent skills: SMS API v3, İYS API v1 and a local SMS API mock.",
+  "owner": {
+    "name": "Netgsm"
+  },
   "plugins": [
     {
       "name": "sms-skills",
       "source": "./plugins/sms-skills",
-      "description": "Netgsm SMS API v3 (including balance queries) and İYS API (consent registration and lookup) integration expert in the open Agent Skills format: authentication, bulk sending, error codes and a local SMS mock API."
+      "description": "Netgsm SMS API v3 and İYS API v1 skills in the open Agent Skills format: authentication, sending, reports, webhooks, balance, consent management, error handling and a local SMS API mock."
     }
   ]
 }

@@ -10,7 +10,7 @@ description: >-
   sorularında, "izni ne zaman kaydetmeliyim, gönderimde nasıl filtrelerim?" sorusunda da kullan. İYS
   entegrasyon kodu yazarken ya da incelerken kullan. Resmî doküman: api-docs.netgsm.com.tr/iys.
   English triggers: Netgsm IYS API, consent management, commercial message consent, opt-in/opt-out,
-  brand code, Turkey.
+  brand code, Türkiye.
 ---
 
 # Netgsm İYS API v1

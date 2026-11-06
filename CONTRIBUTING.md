@@ -1,11 +1,11 @@
 # Contributing
 
 This file is for people developing in this repository. For using the package, see
-[README.md](README.md) ([Türkçe](README.tr.md)).
+[README.md](README.md).
 
 The skill content under `plugins/sms-skills/skills/` and the commands under `plugins/sms-skills/commands/`
-are written in Turkish for developers in Turkey; keep them in Turkish. Repository-level documentation
-(this file, the README, manifest descriptions) is in English, with a Turkish README in `README.tr.md`.
+are written in Turkish for developers in Türkiye; keep them in Turkish. Repository-level documentation
+(this file, the README, manifest descriptions) is in English.
 
 ## Requirements
 
