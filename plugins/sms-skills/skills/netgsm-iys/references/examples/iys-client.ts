@@ -203,11 +203,13 @@ class TokenManager {
   }
 
   private async renew(): Promise<string> {
-    if (this.tokens) {
-      const r = await this.post('/auth/v3/token/refresh', { refresh_token: this.tokens.refresh });
+    const old = this.tokens;
+    if (old) {
+      const r = await this.post('/auth/v3/token/refresh', { refresh_token: old.refresh });
       if (r.ok) return this.store(await r.json());
-      // Geçici refresh hatasında eski token hâlâ geçerliyse onunla devam edilir.
-      if (r.status !== 401 && this.o.now() < this.tokens.expiresAt) return this.tokens.access;
+      // Geçici refresh hatasında eski token hâlâ geçerliyse onunla devam edilir; ancak refresh
+      // beklenirken invalidate() token'ı silmişse (this.tokens !== old) yeniden giriş yapılır.
+      if (r.status !== 401 && this.tokens === old && this.o.now() < old.expiresAt) return old.access;
       this.tokens = undefined;
     }
     // İYS için de scope "sms" (Netgsm kuralı; sözleşme scope belirtmez).

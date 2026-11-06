@@ -362,19 +362,22 @@ export class NetgsmTokenManager {
   }
 
   private async renew(): Promise<string> {
-    if (this.tokens) {
-      const r = await this.post('/auth/v3/token/refresh', { refresh_token: this.tokens.refresh });
+    const old = this.tokens;
+    if (old) {
+      const r = await this.post('/auth/v3/token/refresh', { refresh_token: old.refresh });
       if (r.ok) return this.store(await r.json());
       const p = await readJson(r);
-      if (p.code !== 'invalid_refresh_token') {
+      // Refresh beklenirken invalidate() token'ı silmiş olabilir; o zaman eski token kullanılmaz.
+      const invalidated = this.tokens !== old;
+      if (p.code !== 'invalid_refresh_token' && !invalidated) {
         // Geçici hata (429, 5xx): eski token hâlâ geçerliyse onu kullan ve 30 sn sonra yeniden dene.
-        if (this.now() < this.tokens.expiresAt) {
+        if (this.now() < old.expiresAt) {
           this.retryAfterMs = this.now() + REFRESH_BACKOFF_MS;
-          return this.tokens.access;
+          return old.access;
         }
         throw this.identityError('POST /auth/v3/token/refresh', r, p);
       }
-      this.tokens = undefined; // oturum bitmiş: yeniden giriş
+      this.tokens = undefined; // oturum bitmiş ya da token geçersiz kılınmış: yeniden giriş
     }
     const r = await this.post('/auth/v3/token', { username: this.username, password: this.password, scope: this.scope });
     if (!r.ok) throw this.identityError('POST /auth/v3/token', r, await readJson(r));
