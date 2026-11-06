@@ -10,7 +10,7 @@ description: >-
   8500000000 vb., TESTHEADER) sorularında da kullan. Netgsm SMS API entegrasyon kodu yazarken, incelerken
   ya da abonelik olmadan yerel mock API ile test ederken kullan. Resmî doküman: api-docs.netgsm.com.tr.
   English triggers: Netgsm SMS API, send SMS, bulk SMS, OTP, delivery report, webhook, sender ID,
-  account balance, sandbox, mock server, Turkey.
+  account balance, sandbox, mock server, Türkiye.
 ---
 
 # Netgsm SMS API v3
