@@ -1,0 +1,3206 @@
+openapi: 3.0.3
+info:
+  title: Netgsm SMS API
+  version: "3.0"
+  description: |
+    Bu API ile SMS gönderebilir, iletim raporlarını takip edebilir ve size gelen SMS'leri
+    okuyabilirsiniz.
+
+    ## Kimlik doğrulama
+
+    Her isteğe `Authorization: Bearer <token>` başlığını eklemelisiniz. Token'ı Netgsm
+    Authorization API'nin `POST https://ext-api.netgsm.com.tr/auth/v3/token` ucundan, kullanıcı adınız ve şifrenizle alırsınız.
+    SMS API için token alırken `scope` olarak `sms` göndermelisiniz:
+
+    ```json
+    {
+      "username": "312XXXXXXX",
+      "password": "XXXXXXX",
+      "scope": "sms"
+    }
+    ```
+
+    Token her şeyden önce kontrol edilir; token yoksa ya da geçersizse istek ne olursa olsun
+    `401` döner.
+
+    ## İstek ve yanıt biçimi
+
+    - Gövdeler JSON'dur: `Content-Type: application/json`.
+    - Gövdeyi sıkıştırmadan göndermelisiniz (`Content-Encoding` yalnızca `identity` olabilir).
+    - Bir istek gövdesi en fazla 500 MB olabilir.
+    - Yanıtlarda tüm alanlar her zaman bulunur; değeri olmayan bir alan `null` olarak gönderilir.
+      Tek istisna hata yanıtındaki `rejectedItems` ve `rejectedItemsTruncated` alanlarıdır; bunlar
+      yalnızca `NO_DELIVERABLE_MESSAGES` hatasında bulunur.
+    - Tarih ve saatler saat dilimiyle birlikte ISO-8601 biçimindedir, örneğin
+      `2026-09-10T09:00:00+03:00`.
+
+    ## Hatalar
+
+    Hatalar her zaman aynı `ApiError` yapısıyla döner. Destek ekibine yazarken yanıttaki
+    `requestId` değerini paylaşmanız, isteğinizi kayıtlarda hızlıca bulmamızı sağlar.
+
+    Her uç noktada karşılaşabileceğiniz genel hatalar:
+
+    | Durum | Kod | Ne zaman |
+    |---|---|---|
+    | 401 | `UNAUTHENTICATED` | Token yok veya geçersiz. |
+    | 404 | `NOT_FOUND` | Adres yok. |
+    | 405 | `INVALID_REQUEST` | Adres bu metodu desteklemiyor. Desteklenen metotlar `Allow` başlığındadır. |
+    | 406 | — | `Accept` başlığı JSON'u kabul etmiyor. Bu yanıtın gövdesi yoktur. |
+    | 413 | `INVALID_REQUEST` | Gövde 500 MB'ı aşıyor. |
+    | 415 | `INVALID_REQUEST` | Gövde JSON değil ya da sıkıştırılmış. |
+    | 503 | `SERVICE_UNAVAILABLE` | Servis isteği şu anda kabul edemiyor; isteği biraz sonra tekrar gönderebilirsiniz. |
+servers:
+  - url: https://ext-api.netgsm.com.tr/sms/v3
+    description: Canlı ortam
+
+security:
+  - bearer: []
+
+tags:
+  - name: Gönderim
+    description: SMS gönderme, rehber gruplarına ve OTP gönderme, mesaj uzunluğu hesaplama ve zamanlanmış görevleri iptal etme.
+  - name: Raporlar ve gelen kutusu
+    description: İletim raporları, görev istatistikleri ve hesabınıza gelen SMS'ler.
+  - name: Gönderici adları
+    description: Hesabınıza kayıtlı gönderici başlıkları ve varsayılan başlık.
+  - name: Template
+    description: Template ile SMS gönderme ve kullanabileceğiniz kayıtlı ve herkese açık template'leri listeleme.
+  - name: Kara liste
+    description: Hesabınızın kara listesindeki numaralar.
+  - name: Webhook'lar
+    description: İletim raporlarının ve gelen SMS'lerin sizin adresinize gönderilmesi.
+  - name: Hesap
+    description: Hesabın kalan paketleri, kampanyaları ve kredi bakiyesi.
+
+paths:
+  /send:
+    post:
+      tags: ["Gönderim"]
+      summary: SMS gönderme
+      description: |
+        Bir ya da daha fazla alıcıya SMS gönderen bir görev oluşturur. Görev iletim için kabul
+        edildiğinde 202 döner; iletim sonradan yapılır. Her alıcı `messages` dizisinde ayrı bir kayıttır
+        ve her kaydın kendi metni olabilir.
+
+        **Kayıt başına doğrulama.** Hatalı kayıtlar toplu gönderimi başarısız kılmaz: geçerli kayıtlar
+        gönderilir, hatalılar yanıttaki `rejectedItems` içinde konumları (`index`) ve nedenleriyle
+        bildirilir. Kayıtların hepsi hatalıysa görev oluşturulmaz ve 422 `NO_DELIVERABLE_MESSAGES`
+        döner; bu yanıt da reddedilen kayıtları aynı biçimde `rejectedItems` ve
+        `rejectedItemsTruncated` alanlarında taşır.
+
+        **İstek biçimi.** `Content-Type: application/json`; gövde sıkıştırılmamış olmalı ve 500 MB'ı
+        aşmamalıdır. Bilinmeyen alanlar yok sayılır; `null` verilen bir alan hiç verilmemiş sayılır.
+
+        **İstek sınırı.** Hesap başına dakikada 50.000 istek (mesaj değil, istek). Süre penceresi ilk
+        istekle başlar ve sabittir; reddedilen istekler sayılmaz. Aşıldığında 429 `Retry-After` başlığıyla döner.
+        Toplu gönderimler için çok sayıda alıcıyı tek istekte göndermenizi öneririz.
+
+        **Yeniden deneme.** İsteklerin tekilleştirilmesi yoktur: aynı istek iki kez gönderilirse iki
+        görev oluşur. 503 `SERVICE_UNAVAILABLE` çoğunlukla hiçbir şeyin kuyruğa alınmadığını gösterir. Toplu
+        gönderimi körlemesine yeniden göndermeden önce `GET /report` ile kontrol edebilirsiniz. 400, 403, 413 ve 422
+        yanıtları aynı istekle tekrarlandığında yine aynı sonucu verir.
+
+        **Sonrası.** Yanıttaki `jobId` ile iletim raporlarını `GET /report`, gönderim istatistiklerini
+        `GET /stats` ile sorgulayabilirsiniz. `status` `SCHEDULED` olan bir görev, başlangıç zamanına kadar
+        `POST /cancel` ile iptal edebilirsiniz.
+      operationId: sendSms
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SmsSendRequest"
+            examples:
+              immediate:
+                summary: Hemen gönderim
+                value:
+                  sender: NETGSM
+                  messages:
+                    - text: Merhaba
+                      recipient: "905xxxxxxxxx"
+                  referenceId: order-4711
+              scheduled:
+                summary: Gönderim aralığı ve Türkçe kodlamayla zamanlanmış
+                value:
+                  sender: NETGSM
+                  encoding: TURKISH
+                  startAt: "2026-09-10T09:00:00+03:00"
+                  stopAt: "2026-09-10T12:00:00+03:00"
+                  messages:
+                    - text: Şubemiz bugün açık.
+                      recipient: "905xxxxxxxxx"
+              consentFiltered:
+                summary: Ticari gönderim, marka izinlerine göre İYS filtresinden geçirilmiş
+                value:
+                  sender: NETGSM
+                  iysFilter: BRAND
+                  messages:
+                    - text: Kampanya
+                      recipient: "905xxxxxxxxx"
+              international:
+                summary: Yurt içi ve yurt dışı alıcıya farklı metinlerle
+                description: >-
+                  Yurt dışı numara başına `-` konarak ülke koduyla birlikte yazılır (+49 151 12345678 için
+                  `-4915112345678`). Hesabın yurt dışı gönderim izni yoksa bu kayıt
+                  `NO_INTERNATIONAL_PERMISSION` ile reddedilir ve `rejectedItems` içinde bildirilir; yurt
+                  içi kayıt yine gönderilir.
+                value:
+                  sender: NETGSM
+                  messages:
+                    - text: Siparişiniz kargoya verildi.
+                      recipient: "905061234567"
+                    - text: Your order has been shipped.
+                      recipient: "-4915112345678"
+              partiallyRejected:
+                summary: Bir kaydı hatalı toplu gönderim (yanıt örneğindeki istek)
+                description: >-
+                  İkinci kayıttaki numara `+` ile başladığı için reddedilir; ilk kayıt yine gönderilir.
+                  Reddedilen kayıt yanıttaki `rejectedItems` içinde, `index` değeri 1 ile bildirilir.
+                value:
+                  sender: NETGSM
+                  messages:
+                    - text: Merhaba
+                      recipient: "905xxxxxxxxx"
+                    - text: Merhaba
+                      recipient: "+905xxxxxxxxx"
+                  referenceId: order-4711
+      responses:
+        "202":
+          description: Görev oluşturuldu. İletim sonradan yapılır.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmsSendResponse"
+              example:
+                jobId: "179309912974612345062827"
+                status: QUEUED
+                accepted: 1
+                rejected: 1
+                rejectedItems:
+                  - index: 1
+                    recipient: "+905xxxxxxxxx"
+                    reason: INVALID_RECIPIENT
+                rejectedItemsTruncated: false
+                referenceId: order-4711
+        "400":
+          description: |
+            İstek gövdesi geçersiz. `code` ve `message`:
+
+            | `code` | `message` | Ne zaman |
+            |---|---|---|
+            | `INVALID_REQUEST` | `N field(s) rejected` | Alanlar doğrulamadan geçmedi: `sender` eksik, boş ya da 35 karakterden uzun, `messages` eksik ya da boş, ya da bir alan uzunluk sınırını aşıyor; ya da bir alanın değeri türüne uymuyor: `encoding` listede olmayan bir değer (büyük/küçük harf dahil), `startAt` / `stopAt` saat dilimi farkı olan bir tarih değil, `messages` dizi değil gibi. Hangi alanın neden reddedildiği `violations` içindedir; `encoding` için geçerli değerler de listelenir. |
+            | `INVALID_REQUEST` | `request body could not be read as json` | Gövde geçerli bir JSON değil (sözdizimi hatası). `violations` `null`'dır. |
+            | `INVALID_REQUEST` | `N messages exceeds the limit of 1000000` | 1.000.000'dan fazla mesaj. |
+            | `INVALID_SEND_WINDOW` | — | `startAt` 18 aydan daha ileride. |
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST, INVALID_SEND_WINDOW]
+              example:
+                code: INVALID_REQUEST
+                message: 1 field(s) rejected
+                requestId: 3b9e2f1a6c4d48e7a05f9d2c1b8e7a64
+                timestamp: "2026-09-07T16:42:31.123+03:00"
+                violations:
+                  - field: sender
+                    message: must not be blank
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: |
+            FORBIDDEN. Hesap bu gönderimi yapamaz; `message` şunlardan biridir:
+
+            | `message` | Anlamı |
+            |---|---|
+            | `account is not activated for this operation` | Hesapta SMS gönderimi etkin değil. |
+            | `sub user may not use the sms api` | Alt kullanıcının SMS API'sini kullanma izni yok. |
+            | `account operator is not served for this operation` | Hesabın operatörüne bu uç noktadan hizmet verilmiyor. |
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "413":
+          description: INVALID_REQUEST. Gövde 500 MB'tan büyük ya da toplu gönderim kuyruğa alınamayacak kadar büyük (`message` hangisi olduğunu belirtir). Toplu gönderimi birden fazla isteğe bölmelisiniz.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "422":
+          description: |
+            İstek geçerli ama gönderim yapılamaz. `code` ve `message`:
+
+            | `code` | `message` | Anlamı ve çözüm |
+            |---|---|---|
+            | `REJECTED_HEADER` | `NO_HEADERS_REGISTERED` | Hesapta kayıtlı başlık yok. |
+            | `REJECTED_HEADER` | `NOT_REGISTERED` | `sender` hesaba kayıtlı değil. Kayıtlı başlıkları `GET /senders` ile görebilirsiniz. |
+            | `REJECTED_HEADER` | `CASE_MISMATCH` | Başlık kayıtlı ama büyük/küçük harfi farklı yazılmış; kayıtlı hâliyle göndermelisiniz. |
+            | `REJECTED_HEADER` | `ROUTING_CODE_MISSING` | Alfanümerik başlık için hesapta yönlendirme kodu tanımlı değil. |
+            | `REJECTED_HEADER` | `SUBSCRIBER_NUMBER_RESTRICTED` | Hesapta abone numarasından gönderim kısıtlı. |
+            | `REJECTED_IYS` | `sender header has no iys brand code` | `BRAND` ya da `RETAILER` filtresi uygulanacak ama başlığın İYS marka kodu yok. |
+            | `REJECTED_IYS` | `account is not in iys mode, filtering cannot be applied` | Hesap İYS modunda değil; `iysFilter` `BRAND` ya da `RETAILER` olamaz. |
+            | `NO_DELIVERABLE_MESSAGES` | `all N messages rejected` | Kayıtların hepsi reddedildi; görev oluşturulmadı. Hangi kaydın neden reddedildiği `rejectedItems` içindedir (202 yanıtındakiyle aynı biçim ve aynı 100 kayıt sınırı). |
+
+            Abone numarasından gönderime onaylı olmayan bir hesapta, tamamı rakamlardan oluşan bir `sender`
+            için `NOT_REGISTERED` ve `NO_HEADERS_REGISTERED` mesajlarının sonuna
+            ` (subscriber number headers were not offered)` eklenir.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [REJECTED_HEADER, REJECTED_IYS, NO_DELIVERABLE_MESSAGES]
+              examples:
+                rejectedHeader:
+                  summary: Gönderici kayıtlı değil
+                  value:
+                    code: REJECTED_HEADER
+                    message: NOT_REGISTERED
+                    requestId: ca6fa668966d42169e615c6d236191e2
+                    timestamp: "2026-09-07T16:42:31.123+03:00"
+                    violations: null
+                noDeliverableMessages:
+                  summary: Tüm kayıtlar reddedildi
+                  description: >-
+                    Yalnızca yurt dışı alıcılar içeren bir istek, yurt dışı gönderim izni olmayan bir
+                    hesaptan gönderildi.
+                  value:
+                    code: NO_DELIVERABLE_MESSAGES
+                    message: all 1 messages rejected
+                    requestId: 5d1f0c2a7b3e4f6a9c8d7e6f5a4b3c2d
+                    timestamp: "2026-09-07T16:42:31.123+03:00"
+                    violations: null
+                    rejectedItems:
+                      - index: 0
+                        recipient: "-4915112345678"
+                        reason: NO_INTERNATIONAL_PERMISSION
+                    rejectedItemsTruncated: false
+        "429":
+          description: |
+            RATE_LIMITED. `message` şunlardan biridir:
+
+            - `send rate limit exceeded`: hesap başına dakikada 50.000 istek aşıldı. `Retry-After` kadar
+              bekleyip yeniden denemelisiniz.
+            - `sending is suspended for this account`: hesabın gönderimi askıya alınmış. `Retry-After`
+              yoktur; beklemek işe yaramaz, destek ekibiyle iletişime geçmelisiniz.
+          headers:
+            Retry-After:
+              description: Yeniden denemeden önce beklenecek süre (saniye). Askıya alınmış hesapta bulunmaz.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [RATE_LIMITED]
+        "503":
+          description: SERVICE_UNAVAILABLE. Servis geçici olarak kullanılamıyor. Görev çoğunlukla kuyruğa alınmamıştır. Toplu gönderimi körlemesine yeniden göndermeden önce `GET /report` ile kontrol edebilirsiniz.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [SERVICE_UNAVAILABLE]
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /inbox:
+    get:
+      tags: ["Raporlar ve gelen kutusu"]
+      summary: Gelen SMS'leri listeleme
+      description: |
+        Kimliği doğrulanmış hesabın gelen kutusu, isteğe bağlı olarak bir aralıkla sınırlanır. Boş
+        gelen kutusu `count` 0 ile 200 döner. Saat dilimi farkındaki `+` işaretini URL'de `%2B`
+        olarak kodlamalısınız.
+
+        `startAt` ve `stopAt` değerlerini birlikte göndermeli ya da ikisini de
+        göndermemelisiniz. Hiçbiri gönderilmezse içinde bulunulan ayın bugüne kadarki kısmı, yani ayın 1'i 00:00'dan
+        (Europe/Istanbul) şimdiye kadar kullanılır. Aralık 2 ayı aşamaz.
+      operationId: readInbox
+      parameters:
+        - name: startAt
+          in: query
+          required: false
+          description: Yalnızca `stopAt` ile birlikte.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-08-31T00:00:00+03:00"
+        - name: stopAt
+          in: query
+          required: false
+          description: Yalnızca `startAt` ile birlikte. Ondan önce ya da ondan 2 aydan fazla sonra olamaz.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-08-31T23:59:59+03:00"
+      responses:
+        "200":
+          description: Aralıktaki mesajlar; hiç olmayabilir.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxResponse"
+              example:
+                count: 1
+                messages:
+                  - id: "1"
+                    jobId: "179309912974612345062827"
+                    sender: "5xxxxxxxxx"
+                    text: Merhaba
+                    operator: NETGSM MOBIL
+                    receivedAt: "2026-08-31T12:00:00+03:00"
+                truncated: false
+        "400":
+          description: INVALID_REQUEST. Sınırlardan biri ISO-8601 değil (`message` parametreyi belirtir); `startAt` ve `stopAt`'tan yalnızca biri gönderilmiş; `stopAt`, `startAt`'tan önce; aralık 2 aydan geniş.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: FORBIDDEN. Hesapta gelen SMS etkin değil ya da SMS menüsü olmayan bir alt kullanıcı.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /report:
+    get:
+      tags: ["Raporlar ve gelen kutusu"]
+      summary: İletim raporlarını sorgulama
+      description: |
+        Kimliği doğrulanmış hesabın iletim raporlarından bir sayfa. Bir sayfada en fazla 100 rapor
+        bulunur.
+        Tüm raporlar için `count` 100'ün altında dönene kadar sonraki sayfalar istenebilir. Boş sayfa `count` 0 ile 200 döner.
+
+        Raporlar kaydedildikleri sırayla döner. Sayfalar gezilirken yeni raporlar eklenebilir; bu yüzden
+        aynı sorgunun sayfaları farklı zamanlarda istendiğinde sonuçlar değişebilir.
+
+        Gönderdiğiniz bir alıcı raporlarda yoksa iletim raporu henüz gelmemiştir: mesaj hâlâ
+        bekliyordur. Raporu daha sonra yeniden sorgulayabilirsiniz. Karşı operatör ya da son kullanıcı adresi kaynaklı nedenlerle
+        yeni gelen bir raporun yanıta yansıması 5 dakikayı bulabilir.
+
+        `startAt` ve `stopAt`, mesajın gönderildiği zamana uygulanır. İkisini birlikte göndermeli
+        ya da hiçbirini göndermemelisiniz. Hiçbiri gönderilmezse içinde bulunulan ayın bugüne kadarki kısmı, yani
+        ayın 1'i 00:00'dan (Europe/Istanbul) şimdiye kadar kullanılır. Aralık 1 ayı aşamaz. Aralık
+        dakika hassasiyetindedir: `startAt`'ın bulunduğu dakikanın başından `stopAt`'ın bulunduğu
+        dakikanın sonuna kadar gönderilen mesajlar döner. Saat dilimi farkındaki `+` işaretini URL'de
+        `%2B` olarak kodlamalısınız.
+
+      operationId: readReports
+      parameters:
+        - name: jobIds
+          in: query
+          required: false
+          description: Tekrarlanabilir ya da virgülle ayrılmış. Gönderilmezse aralıktaki tüm görevler döner.
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+          example: ["179309912974612345062827"]
+        - name: startAt
+          in: query
+          required: false
+          description: Yalnızca `stopAt` ile birlikte.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-08-01T00:00:00+03:00"
+        - name: stopAt
+          in: query
+          required: false
+          description: Yalnızca `startAt` ile birlikte. Ondan önce ya da ondan 1 aydan fazla sonra olamaz.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-08-31T23:59:59+03:00"
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Raporlardan bir sayfa; boş olabilir.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportResponse"
+              example:
+                count: 2
+                page: 0
+                reports:
+                  - jobId: "179309912974612345062827"
+                    number: "5xxxxxxxxx"
+                    status: DELIVERED
+                    operator: VODAFONE
+                    messageLength: 1
+                    deliveredAt: "2026-08-31T12:34:56+03:00"
+                    failReason: null
+                    referenceId: "8f3a1c"
+                  - jobId: "179309912974612345062827"
+                    number: "5xxxxxxxxx"
+                    status: NOT_DELIVERED
+                    operator: VODAFONE
+                    messageLength: 1
+                    deliveredAt: null
+                    failReason: TIMEOUT
+                    referenceId: null
+        "400":
+          description: INVALID_REQUEST. Sınırlardan biri ISO-8601 değil ya da `page` sayı değil (`message` parametreyi belirtir); `page` negatif; `startAt` ve `stopAt`'tan yalnızca biri gönderilmiş; `stopAt`, `startAt`'tan önce; aralık 1 aydan geniş.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: FORBIDDEN. SMS menüsü olmayan bir alt kullanıcı.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "429":
+          description: RATE_LIMITED. Hesap için dakikada 60 istek aşıldı ya da istekteki bir görev numarası son bir dakika içinde sorulmuş; `message` hangisi olduğunu söyler.
+          headers:
+            Retry-After:
+              description: Engelleyen sayacın süresi dolana kadar kalan saniye.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [RATE_LIMITED]
+        "503":
+          description: SERVICE_UNAVAILABLE. İstek daha sonra yeniden gönderilebilir.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [SERVICE_UNAVAILABLE]
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /senders:
+    get:
+      tags: ["Gönderici adları"]
+      summary: Gönderici başlıklarını listeleme
+      description: |
+        Kimliği doğrulanmış hesaba kayıtlı gönderici başlıkları. Her başlık için `usable`, o başlıkla
+        yapılacak bir gönderimin kabul edilip edilmeyeceğini; `reason`, edilmeyecekse nedenini gösterir.
+        Abone numaraları yalnızca abone numarasından gönderim için onaylı hesaplarda listelenir.
+        Başlığı olmayan bir hesap `count` 0 ile 200 alır.
+
+        Eklenen, değiştirilen ya da silinen bir başlık hemen görünür. Hesap ayarlarındaki bir değişikliğin
+        (örneğin yönlendirme kodu) `usable` ve `reason` alanlarına yansıması kısa bir süreyi bulabilir.
+      operationId: listSenders
+      responses:
+        "200":
+          description: Kayıtlı başlıklar; hiç olmayabilir.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendersResponse"
+              example:
+                count: 2
+                senders:
+                  - name: NETGSM
+                    type: ALPHANUMERIC
+                    brandCode: 4567
+                    usable: true
+                    reason: null
+                  - name: "5xxxxxxxxx"
+                    type: SUBSCRIBER_NUMBER
+                    brandCode: 0
+                    usable: false
+                    reason: SUBSCRIBER_NUMBER_RESTRICTED
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: FORBIDDEN. SMS menüsü olmayan bir alt kullanıcı.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /senders/default:
+    get:
+      tags: ["Gönderici adları"]
+      summary: Varsayılan gönderici başlığını öğrenme
+      description: |
+        Hesabın varsayılan gönderici başlığı, anlık olarak okunur; bu yüzden bir değişiklik hemen
+        görünür. Varsayılan ayarlanmamışsa `sender` açıkça null olarak 200 ile döner.
+      operationId: readDefaultSender
+      responses:
+        "200":
+          description: Varsayılan başlık; ayarlanmamışsa `sender` null.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DefaultSenderResponse"
+              example:
+                sender:
+                  name: NETGSM
+                  type: ALPHANUMERIC
+                  brandCode: 4567
+                  usable: true
+                  reason: null
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: FORBIDDEN. SMS menüsü olmayan bir alt kullanıcı.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Failed"
+    put:
+      tags: ["Gönderici adları"]
+      summary: Varsayılan gönderici başlığını değiştirme
+      description: |
+        Kayıtlı bir başlığı varsayılan yapar. Ad, kayıtlı bir başlıkla birebir eşleşmelidir:
+        büyük/küçük harf dahil ve yazıldığı gibi - kırpma yapılmaz, 0 ya da 90 öneki olmaz. Yeni
+        varsayılanı döndürür. Gönderim için kullanılamayan bir başlık da varsayılan yapılabilir; bu
+        durumda yanıtta `usable` false olur ve `reason` nedenini belirtir.
+      operationId: changeDefaultSender
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DefaultSenderChangeRequest"
+            example:
+              name: NETGSM
+      responses:
+        "200":
+          description: Yeni varsayılan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DefaultSenderResponse"
+              example:
+                sender:
+                  name: NETGSM
+                  type: ALPHANUMERIC
+                  brandCode: 4567
+                  usable: true
+                  reason: null
+        "400":
+          description: INVALID_REQUEST. `name` eksik ya da boş (`violations` belirtir) veya gövde JSON değil.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: FORBIDDEN. SMS menüsü olmayan bir alt kullanıcı.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "422":
+          description: REJECTED_HEADER. `message` NO_HEADERS_REGISTERED, NOT_REGISTERED ya da CASE_MISMATCH.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [REJECTED_HEADER]
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          description: SERVICE_UNAVAILABLE. İstek daha sonra yeniden gönderilebilir.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [SERVICE_UNAVAILABLE]
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /cancel:
+    post:
+      tags: ["Gönderim"]
+      summary: Zamanlanmış gönderimi iptal etme
+      description: |
+        Hesabınızın henüz gönderilmemiş bir görevini geri çeker. Görev numarasını istek gövdesinde
+        gönderirsiniz.
+
+        **Hangi görevler.** Yalnızca hesabınıza ait ve hâlâ bekleyen bir görev iptal edilebilir; başka bir
+        hesabın görevini iptal etmenin yolu yoktur. Bekleyen görev, `POST /send` ya da `POST /send/template` yanıtında `SCHEDULED`
+        durumunu almış görevdir. `QUEUED` yanıtı alan bir görev zaten gönderilmektedir; iptal etmek
+        404 döner.
+
+        **İstek sınırı.** Hesap başına dakikada 25.000 istek. Süre penceresi ilk istekle başlar ve
+        sabittir. Aşıldığında 429 `Retry-After` başlığıyla döner.
+
+        **Yeniden deneme.** İptali yeniden göndermek her zaman güvenlidir: görev ilk istekte iptal
+        edildiyse ikinci istek 404 döner.
+      operationId: cancelJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelRequest"
+            example:
+              jobId: "179309912974612345062827"
+      responses:
+        "200":
+          description: Görev bekliyordu ve artık iptal edildi.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelResponse"
+              example:
+                jobId: "179309912974612345062827"
+                cancelledAt: "2026-09-10T12:00:00+03:00"
+        "400":
+          description: |
+            INVALID_REQUEST. `code` ve `message`:
+
+            | `message` | Ne zaman |
+            |---|---|
+            | `1 field(s) rejected` | `jobId` eksik, boş, yalnızca boşluktan oluşuyor ya da 64 karakterden uzun. `violations` belirtir. |
+            | `request body could not be read as json` | Gövde JSON değil. |
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: FORBIDDEN, `message` `sub user may not use the sms api`. SMS menüsü olmayan bir alt kullanıcı. Ana hesap için ayrıca bir etkinleştirme gerekmez.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "404":
+          description: >-
+            NOT_FOUND, `message` `job not found for this account, or no longer waiting to be sent`. Bu kimlikle hesabınıza ait bekleyen bir görev yok: hiç var olmadı, başka bir hesaba ait, zaten gönderildi ya da daha önce iptal edildi. Bu durumlar birbirinden ayrılmaz.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [NOT_FOUND]
+        "429":
+          description: RATE_LIMITED, `message` `cancel rate limit exceeded`. Hesap başına dakikada 25.000 istek aşıldı; `Retry-After` kadar bekleyip yeniden denemelisiniz.
+          headers:
+            Retry-After:
+              description: Yeniden denemeden önce beklenecek süre (saniye).
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [RATE_LIMITED]
+        "503":
+          description: >-
+            SERVICE_UNAVAILABLE. İptal servisine ulaşılamadı, servis bir hata döndü ya da tanınmayan bir
+            yanıt verdi. Görev büyük olasılıkla iptal edilmedi; isteği daha sonra yeniden gönderebilirsiniz.
+            Görev bu arada iptal edildiyse 404 döner.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [SERVICE_UNAVAILABLE]
+        "504":
+          description: >-
+            QUEUE_UNCONFIRMED. İptal iletildi ama yanıtı alınamadı; görev iptal edilmiş olabilir. İptali yeniden gönderebilirsiniz: görev iptal edildiyse 404 döner.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [QUEUE_UNCONFIRMED]
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /stats:
+    get:
+      tags: ["Raporlar ve gelen kutusu"]
+      summary: Gönderim istatistiklerini sorgulama
+      description: |
+        Kimliği doğrulanmış hesabın bir görevi için, gönderildiği ay üzerinden toplanmış, her farklı
+        sonuç başına bir satır. Ay varsayılan olarak içinde bulunulan aydır. Satır yoksa 404
+        NOT_FOUND döner - bilinmeyen bir görev, başka bir hesabın görevi ve yanlış ay aynı görünür.
+        200 yanıtında her zaman en az bir satır bulunur.
+      operationId: readStats
+      parameters:
+        - name: jobId
+          in: query
+          required: true
+          schema:
+            type: string
+          example: "179309912974612345062827"
+        - name: month
+          in: query
+          required: false
+          description: Görevin gönderildiği ay. Varsayılan, içinde bulunulan ay.
+          schema:
+            type: string
+            pattern: "^\\d{4}-\\d{2}$"
+          example: "2026-09"
+      responses:
+        "200":
+          description: Görevin toplamları; en az bir satır.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsResponse"
+              example:
+                jobId: "179309912974612345062827"
+                month: "2026-09"
+                count: 2
+                stats:
+                  - status: DELIVERED
+                    failReason: null
+                    messageCount: 4
+                    totalParts: 4
+                    domestic: true
+                    charging: charged
+                    chargeDescription: "1.26 TL from: credit balance"
+                  - status: NOT_DELIVERED
+                    failReason: INVALID_NUMBER
+                    messageCount: 1
+                    totalParts: 0
+                    domestic: true
+                    charging: uncharged
+        "400":
+          description: INVALID_REQUEST. `jobId` eksik ya da boş veya `month` yyyy-MM değil; `message` parametreyi belirtir.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: FORBIDDEN. SMS menüsü olmayan bir alt kullanıcı.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "404":
+          description: NOT_FOUND, `message` `job not found`. Bu görev için ayda satır yok - bilinmeyen kimlik, başka bir hesabın görevi ya da farklı bir ayda gönderilmiş. Bu durumlar birbirinden ayrılmaz.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [NOT_FOUND]
+        "429":
+          description: RATE_LIMITED. Hesap için dakikada 60 istek aşıldı ya da bu görev numarası son 10 dakika içinde sorulmuş; `message` hangisi olduğunu söyler. İkisi de okuma sonunda 404 ya da 503 ile bitse bile sayılır.
+          headers:
+            Retry-After:
+              description: Engelleyen sayacın süresi dolana kadar kalan saniye.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [RATE_LIMITED]
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /webhooks/report:
+    post:
+      tags: ["Webhook'lar"]
+      summary: İletim raporu webhook'u kaydetme
+      description: |
+        Hesabın iletim raporlarının gönderileceği adres. Hesap başına bir tane; var olanın
+        üzerine kayıt 409 ile reddedilir; önce mevcut kaydı silmeniz gerekir. Etkinleştirme gerekmez; alt kullanıcı için SMS
+        menüsü gerekir.
+      operationId: registerReportWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRequest"
+            example:
+              url: https://example.com/report
+              headers: "Authorization: Bearer token123"
+      callbacks:
+        deliveryReport:
+          "{$request.body#/url}":
+            post:
+              tags: ["Webhook'lar"]
+              summary: İletim raporları webhook adresinize gönderilir
+              description: |
+                İletim raporları, kayıtlı adrese periyodik olarak ve toplu hâlde `POST` ile gönderilir.
+                Bir istek, hesabın bekleyen raporlarından bir grubu `numbers` dizisinde taşır. Bekleyen rapor
+                sayısı fazlaysa raporlar aynı periyotta birden fazla isteğe bölünebilir.
+
+                - Kayıt sırasında `headers` verildiyse o başlık her istekte gönderilir; isteğin
+                  Netgsm'den geldiğini bu başlıkla doğrulayabilirsiniz.
+                - Bağlantının 60 saniye içinde kurulması, yanıtın 10 dakika içinde gelmesi gerekir; aksi
+                  halde istek başarısız sayılır.
+                - Herhangi bir `2xx` yanıt, raporların teslim alındığı anlamına gelir. Yanıt gövdesi
+                  okunmaz.
+                - Zaman aşımı, `2xx` dışındaki bir yanıt ya da bağlantı hatası durumunda o istekteki
+                  raporlar **yeniden gönderilmez**. Bu raporlara `GET /report` ile ulaşılabilir.
+                - Zamanlar saat dilimi bilgisi olmadan, Türkiye saatiyle (UTC+3) `yyyy-MM-dd HH:mm:ss`
+                  biçimindedir.
+                - `status`, `operator` ve `errorCode` sayısal kodlardır; `GET /report` ise aynı bilgiyi
+                  ad olarak döndürür. Karşılıkları alan açıklamalarındaki tablolardadır.
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: "#/components/schemas/ReportWebhookPayload"
+                    example:
+                      numbers:
+                        - jobid: "179309912974612345062827"
+                          number: "5xxxxxxxxx"
+                          status: 1
+                          operator: 10
+                          msglen: 1
+                          deliveredDate: "2026-10-27 14:06:12"
+                          errorCode: 0
+                          referansID: "8f3a1c"
+                        - jobid: "179309912974612345062827"
+                          number: "5xxxxxxxxx"
+                          status: 2
+                          operator: 30
+                          msglen: 1
+                          deliveredDate: "2026-10-27 14:09:40"
+                          errorCode: 115
+                          referansID: null
+              responses:
+                "200":
+                  description: Raporlar teslim alındı. Herhangi bir `2xx` yanıt aynı anlama gelir.
+      responses:
+        "201":
+          description: Kaydedildi.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookResponse"
+        "400":
+          description: 'INVALID_REQUEST. `url` eksik, çok uzun ya da host içeren mutlak bir http(s) URL değil; host''u çözümlenmiyor ya da yalnızca genel (public) adreslere çözümlenmiyor; `headers` çok uzun, tek bir `Name: value` satırı değil ya da değerinde virgül veya iki nokta üst üste var; gövde JSON değil.'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: FORBIDDEN. SMS menüsü olmayan bir alt kullanıcı.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "409":
+          description: >-
+            ALREADY_EXISTS. Kayıtlı bir iletim raporu webhook'u var; önce silmeniz gerekir. Hesap için başka bir
+            iletim raporu webhook kaydı sürerken de döner; o tamamlandığında istek yeniden gönderilebilir.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [ALREADY_EXISTS]
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Failed"
+    delete:
+      tags: ["Webhook'lar"]
+      summary: İletim raporu webhook'unu silme
+      operationId: deleteReportWebhook
+      responses:
+        "204":
+          description: Kaldırıldı.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: FORBIDDEN. Kayıttaki kuralın aynısı.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "404":
+          description: NOT_FOUND. Kayıtlı bir iletim raporu webhook'u yok.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [NOT_FOUND]
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /webhooks/inbox:
+    post:
+      tags: ["Webhook'lar"]
+      summary: Gelen SMS webhook'u kaydetme
+      description: |
+        Hesaba gelen SMS'lerin gönderileceği adres. Hesap başına bir tane; var olanın
+        üzerine kayıt 409 ile reddedilir; önce mevcut kaydı silmeniz gerekir. Etkinleştirme gerekmez; alt kullanıcı için SMS
+        menüsü gerekir.
+      operationId: registerInboxWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRequest"
+            example:
+              url: https://example.com/inbox
+              headers: "Authorization: Bearer token123"
+      callbacks:
+        inboundSms:
+          "{$request.body#/url}":
+            post:
+              tags: ["Webhook'lar"]
+              summary: Gelen SMS webhook adresinize gönderilir
+              description: |
+                Hesaba gelen her SMS, geldiği anda kayıtlı adrese tek tek `POST` ile gönderilir.
+
+                - Kayıt sırasında `headers` verildiyse o başlık her istekte gönderilir; isteğin
+                  Netgsm'den geldiğini bu başlıkla doğrulayabilirsiniz.
+                - Her istekte, isteğe özgü bir `X-Correlation-Id` başlığı bulunur. Destek ekibine
+                  yazarken bu değeri paylaşmanız, isteğin kayıtlarda bulunmasını sağlar.
+                - Adresin 4 saniye içinde yanıt vermesi gerekir. Herhangi bir `2xx` yanıt, mesajın
+                  teslim alındığı anlamına gelir; yanıt gövdesi dikkate alınmaz.
+                - Zaman aşımı, `2xx` dışındaki bir yanıt ya da bağlantı hatası durumunda mesaj
+                  **yeniden gönderilmez**. Bu mesajlara `GET /inbox` ile ulaşılabilir.
+                - Zamanlar saat dilimi bilgisi olmadan, Türkiye saatiyle (UTC+3) `yyyy-MM-dd HH:mm:ss`
+                  biçimindedir.
+              parameters:
+                - name: X-Correlation-Id
+                  in: header
+                  required: true
+                  description: İsteğe özgü kimlik.
+                  schema:
+                    type: string
+                    format: uuid
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: "#/components/schemas/InboxWebhookPayload"
+                    example:
+                      messageId: "4815162342"
+                      messageDateTime: "2026-10-27 14:06:12"
+                      sourceNumber: "5xxxxxxxxx"
+                      content: Merhaba
+                      subscriberNumber: "850xxxxxxx"
+              responses:
+                "200":
+                  description: Mesaj teslim alındı. Herhangi bir `2xx` yanıt aynı anlama gelir.
+      responses:
+        "201":
+          description: Kaydedildi.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookResponse"
+        "400":
+          description: 'INVALID_REQUEST. `url` eksik, çok uzun ya da host içeren mutlak bir http(s) URL değil; host''u çözümlenmiyor ya da yalnızca genel (public) adreslere çözümlenmiyor; `headers` çok uzun, tek bir `Name: value` satırı değil ya da değerinde virgül veya iki nokta üst üste var; gövde JSON değil.'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: FORBIDDEN. SMS menüsü olmayan bir alt kullanıcı.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "409":
+          description: >-
+            ALREADY_EXISTS. Kayıtlı bir gelen SMS webhook'u var; önce silmeniz gerekir. Hesap için başka bir gelen
+            SMS webhook kaydı sürerken de döner; o tamamlandığında istek yeniden gönderilebilir.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [ALREADY_EXISTS]
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Failed"
+    delete:
+      tags: ["Webhook'lar"]
+      summary: Gelen SMS webhook'unu silme
+      operationId: deleteInboxWebhook
+      responses:
+        "204":
+          description: Kaldırıldı.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: FORBIDDEN. Kayıttaki kuralın aynısı.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "404":
+          description: NOT_FOUND. Kayıtlı bir gelen SMS webhook'u yok.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [NOT_FOUND]
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /blacklist:
+    get:
+      tags: ["Kara liste"]
+      summary: Kara listeyi öğrenme
+      description: |
+        Hesabın kara listesindeki numaraları döndürür. İki kullanımı vardır:
+
+        - **Liste:** `number` verilmezse kara liste sayfa sayfa döner. Her sayfada en fazla 200 numara
+          bulunur, en son eklenen önce gelir. İlk sayfa 0'dır.
+        - **Tek numara sorgusu:** `number` verilirse yalnızca o numaraya bakılır. Numara kara listedeyse
+          `count` 0'dan büyüktür ve numara `numbers` içinde yer alır; değilse `count` 0 ve `numbers` boştur.
+
+        Kara listede numara olmaması ya da listenin sonunu geçen bir sayfanın istenmesi hata değildir;
+        yanıt `count` 0 ve boş `numbers` ile başarılı döner.
+      operationId: readBlacklist
+      parameters:
+        - name: page
+          in: query
+          required: false
+          description: İstenen sayfa, 0'dan başlar. Tek numara sorgusunda yanıtı etkilemez.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: number
+          in: query
+          required: false
+          description: Sorgulanacak tek numara; bir alıcı için 90 ve on rakam. Yalnızca rakam, en fazla 15; başka her şey 400 alır. Baştaki ve sondaki boşluklar kırpılır; boş bir değer `number` hiç gönderilmemiş gibi değerlendirilir.
+          schema:
+            type: string
+            pattern: "^[0-9]{1,15}$"
+          example: "905xxxxxxxxx"
+      responses:
+        "200":
+          description: Bir sayfa ya da tek bir numara hakkındaki yanıt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlacklistResponse"
+              examples:
+                page:
+                  value:
+                    count: 1
+                    page: 0
+                    number: null
+                    numbers: ["905xxxxxxxxx"]
+                lookup:
+                  value:
+                    count: 1
+                    page: null
+                    number: "905xxxxxxxxx"
+                    numbers: ["905xxxxxxxxx"]
+        "400":
+          description: INVALID_REQUEST. `page` sayı değil ya da negatif veya `number` 1 ile 15 rakam arasında değil; `message` parametreyi belirtir.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "429":
+          description: RATE_LIMITED. Hesap dakikada 60 istek sınırını aştı ya da aynı sorgu (aynı `page` ve `number` değerleri) son 10 dakika içinde yanıtlandı; `message` hangisi olduğunu belirtir. Hatayla sonuçlanan bir sorgu beklemeden tekrar gönderilebilir.
+          headers:
+            Retry-After:
+              description: Engelleyen sayacın süresi dolana kadar kalan saniye.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [RATE_LIMITED]
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /length:
+    post:
+      tags: ["Gönderim"]
+      summary: SMS uzunluğunu hesaplama
+      description: |
+        Bir metnin kaç parça tuttuğu ve sınıra ne kadar uzak olduğu; send uç noktasının saydığı
+        şekilde birebir sayılır. Yalnızca bir hesaplamadır: hiçbir şey gönderilmez ya da saklanmaz.
+        Fazla uzun bir metin `fits` false ve negatif `remaining` ile 200 döner.
+      operationId: measureLength
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LengthRequest"
+            example:
+              text: "Merhaba, şifreniz 123456"
+              encoding: TURKISH
+              alphanumericSender: true
+      responses:
+        "200":
+          description: Ölçüm.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LengthResponse"
+              example:
+                encoding: TURKISH
+                length: 30
+                parts: 1
+                limit: 888
+                fits: true
+                remaining: 858
+                remainingUntilNextPart: 125
+        "400":
+          description: INVALID_REQUEST. `text` yok ya da 10000 karakterden uzun, `encoding` bilinmiyor veya gövde JSON değil.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /directory/send:
+    post:
+      tags: ["Gönderim"]
+      summary: Rehbere SMS gönderme
+      description: |
+        Rehberdeki kişi gruplarına, istekte verilen kişilere ya da her ikisine tek bir metinle
+        gönderimi kuyruğa alır. Gruplar ve kişiselleştirme, yanıt döndükten sonra işlenir.
+
+        - En az bir grup (`groupIds`) ya da kişi (`contacts`) belirtmelisiniz. Yalnızca numaralara
+          göndermek için `POST /send`'i kullanın.
+        - `UNICODE` kodlaması bu uç noktada desteklenmez.
+        - Onay için bekletilen bir görev de 202 alır; neyin beklettiğini `review` söyler.
+
+        **İstek sınırı.** Hesap başına dakikada 60 istek, `/send` sınırından ayrı. Süre penceresi ilk
+        istekle başlar ve sabittir. Aşıldığında 429 `Retry-After` başlığıyla döner.
+
+        **Yeniden deneme.** Aynı istek iki kez gönderilirse iki görev oluşur ve gruplara iki kez mesaj
+        gider. 503 ya da 504 aldıysanız yeniden göndermeden önce `GET /report` ile kontrol etmelisiniz.
+      operationId: sendToDirectory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DirectorySendRequest"
+            example:
+              sender: NETGSM
+              text: "Merhaba"
+              encoding: TURKISH
+              groupIds: [7, 8]
+              contacts:
+                - number: "905xxxxxxxxx"
+                  name: Ali
+                  surname: Veli
+      responses:
+        "202":
+          description: Kuyruğa alındı. Gönderim, gönderim aralığı içinde yapılır.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DirectorySendResponse"
+              example:
+                jobId: "179309912974612345062827"
+                status: QUEUED
+                review: NONE
+        "400":
+          description: |
+            İstek geçersiz. `code` ve `message`:
+
+            | `code` | `message` | Ne zaman |
+            |---|---|---|
+            | `INVALID_REQUEST` | `N field(s) rejected` | Alanlar doğrulamadan geçmedi (eksik `sender` ya da `text`, uzunluk sınırları, `addressType` 0–17 dışında, `contacts[].number` boş) ya da bir değer türüne uymuyor (`encoding` listede yok, tarih saat dilimi farkı olmadan yazılmış gibi). `violations` belirtir. |
+            | `INVALID_REQUEST` | `request body could not be read as json` | Gövde geçerli bir JSON değil. |
+            | `INVALID_REQUEST` | `encoding UNICODE is not supported for directory sends` | `encoding` `UNICODE`. |
+            | `INVALID_REQUEST` | `a directory send names at least one group or contact; for numbers alone use /sms/v3/send` | `groupIds` ve `contacts` ikisi de boş. |
+            | `INVALID_REQUEST` | `text exceeds N characters for this encoding and sender` | Metin, `encoding` ve gönderici türüne göre sınırı aşıyor; bkz. `text`. |
+            | `INVALID_REQUEST` | `a required field is missing` | Platform eksik bir alan bildirdi. |
+            | `INVALID_SEND_WINDOW` | `the send window was rejected` | Platform `startAt` / `stopAt` aralığını kabul etmedi; bkz. `stopAt`. |
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST, INVALID_SEND_WINDOW]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: |
+            Hesap bu gönderimi yapamaz. `code` ve `message`:
+
+            | `code` | `message` | Anlamı |
+            |---|---|---|
+            | `FORBIDDEN` | `account is not activated for this operation` | Hesapta SMS gönderimi etkin değil. |
+            | `FORBIDDEN` | `sub user may not use the sms api` | Alt kullanıcının SMS API'sini kullanma izni yok. |
+            | `FORBIDDEN` | `account operator is not served for this operation` | Hesabın operatörüne bu uç noktadan hizmet verilmiyor. |
+            | `FORBIDDEN` | `account is not permitted to send` | Platform, hesabın gönderim yetkisi olmadığını bildirdi. |
+            | `E_SIGNATURE_REQUIRED` | `the requested menu requires an e-signature login on the account` | Bu gönderim için hesapta e-imza ile giriş gerekiyor. |
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN, E_SIGNATURE_REQUIRED]
+        "422":
+          description: |
+            İstek geçerli ama gönderim yapılamaz. `code` ve `message`:
+
+            | `code` | `message` | Anlamı ve çözüm |
+            |---|---|---|
+            | `REJECTED_HEADER` | `NO_HEADERS_REGISTERED` | Hesapta kayıtlı başlık yok. |
+            | `REJECTED_HEADER` | `NOT_REGISTERED` | `sender` hesaba kayıtlı değil. Kayıtlı başlıkları `GET /senders` ile görebilirsiniz. |
+            | `REJECTED_HEADER` | `CASE_MISMATCH` | Başlık kayıtlı ama büyük/küçük harfi farklı yazılmış; kayıtlı hâliyle göndermelisiniz. |
+            | `REJECTED_HEADER` | `ROUTING_CODE_MISSING` | Alfanümerik başlık için hesapta yönlendirme kodu tanımlı değil. |
+            | `REJECTED_HEADER` | `SUBSCRIBER_NUMBER_RESTRICTED` | Hesapta abone numarasından gönderim kısıtlı. |
+            | `REJECTED_IYS` | `consent filtering cannot be applied to this sender or account` | Platform, istenen İYS filtresini bu başlık ya da hesap için uygulayamadı. |
+
+            Abone numarasından gönderime onaylı olmayan bir hesapta, tamamı rakamlardan oluşan bir `sender`
+            için `NOT_REGISTERED` ve `NO_HEADERS_REGISTERED` mesajlarının sonuna
+            ` (subscriber number headers were not offered)` eklenir.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [REJECTED_HEADER, REJECTED_IYS]
+        "429":
+          description: RATE_LIMITED, `message` `directory send rate limit exceeded`. Hesap başına dakikada 60 istek aşıldı; `Retry-After` kadar bekleyip yeniden denemelisiniz.
+          headers:
+            Retry-After:
+              description: Yeniden denemeden önce beklenecek süre (saniye).
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [RATE_LIMITED]
+        "503":
+          description: >-
+            SERVICE_UNAVAILABLE. Platforma ulaşılamadı, platform bir hata döndü ya da görev numarası
+            vermedi. Platforma ulaşılamadıysa hiçbir şey kuyruğa alınmamıştır; diğer durumlarda görev
+            kuyruğa alınmış olabilir. Yeniden göndermeden önce `GET /report` ile kontrol etmelisiniz.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [SERVICE_UNAVAILABLE]
+        "504":
+          description: QUEUE_UNCONFIRMED. Gönderim platforma iletildi ama yanıtı alınamadı; görev kuyruğa alınmış olabilir. Yeniden göndermeden önce `GET /report` ile kontrol etmelisiniz.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [QUEUE_UNCONFIRMED]
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /send/template:
+    post:
+      tags: ["Template"]
+      summary: Template ile SMS gönderme
+      description: |
+        Kayıtlı template'leri verilen parametrelerle doldurup gönderen bir görev oluşturur. Her kayıt bir
+        template, template'in parametreleri ve bir alıcıdır. Kullanılabilecek template'ler hesabın kendi
+        template'leri ve herkese açık template'lerdir; kimlikleri ve parametreleri `GET /templates` ile
+        listelenir. Doldurulan metinler `/send`'e verilmiş gibi işlenir ve yanıt `/send` yanıtıyla aynıdır.
+
+        **Toplu doğrulama.** Bir istekte en fazla 20 kayıt bulunur. `/send`'den farklı olarak template ile
+        ilgili hatalar isteğin tamamını reddeder ve hiçbir şey gönderilmez: eksik ya da geçersiz bir
+        `templateId` veya `recipient`, hesabın kullanamadığı bir template ya da template'e uymayan parametreler
+        400 döndürür. Template'ler doldurulduktan sonra kayıtlar `/send`'deki gibi tek tek değerlendirilir
+        (alıcı biçimi, metin uzunluğu, mükerrer alıcı). Hatalı kayıtlar `rejectedItems` içinde
+        `templates` dizisindeki konumlarıyla (`index`) bildirilir.
+
+        **İstek sınırı.** Hesap başına dakikada 1000 istek, `/send` sınırından ayrı. Pencere ilk istekle
+        başlar ve sabittir; reddedilen istekler de sayılır. Aşıldığında 429 `Retry-After` başlığıyla döner.
+
+        **Yeniden deneme.** `/send` ile aynıdır: aynı istek iki kez gönderilirse iki görev oluşur. 503
+        çoğunlukla hiçbir şeyin kuyruğa alınmadığını gösterir. Körlemesine yeniden göndermeden önce
+        `GET /report` ile kontrol edebilirsiniz.
+      operationId: sendFromTemplate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TemplateSendRequest"
+            example:
+              sender: NETGSM
+              templates:
+                - templateId: 3
+                  recipient: "905061234567"
+                  params:
+                    otpCode: "123456"
+                - templateId: 4
+                  recipient: "905061234568"
+              encoding: TURKISH
+              referenceId: order-4711
+      responses:
+        "202":
+          description: Görev oluşturuldu. İletim sonradan yapılır.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmsSendResponse"
+              example:
+                jobId: "179309912974612345078627"
+                status: QUEUED
+                accepted: 2
+                rejected: 0
+                rejectedItems: []
+                rejectedItemsTruncated: false
+                referenceId: order-4711
+        "400":
+          description: |
+            INVALID_REQUEST ya da INVALID_SEND_WINDOW (`startAt` 18 aydan daha ileride). INVALID_REQUEST
+            için `message`:
+
+            | `message` | Anlamı |
+            |---|---|
+            | gövde doğrulaması, `violations` ile | Zorunlu bir alan eksik, 20'den fazla kayıt, bir kaydın `recipient` alanı boş ya da 17 karakterden uzun. `violations` alanı belirtir (`templates[0].recipient`). |
+            | `templates not found: [4]` | Template yok, silinmiş ya da başka bir hesaba ait. Bu durumlar birbirinden ayrılmaz. |
+            | `Invalid params for templateId 3. Missing params: [otpCode]` | Template'in bir parametresi verilmemiş ya da boş. |
+            | `Invalid params for templateId 3. Unexpected params: [code]` | Template'te olmayan bir parametre verilmiş. |
+            | `param 'otpCode' is not a valid BIGINT` | Değer, parametrenin tanımlı türüne ya da uzunluğuna uymuyor; `message` hangi parametre olduğunu belirtir. |
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST, INVALID_SEND_WINDOW]
+              example:
+                code: INVALID_REQUEST
+                message: "templates not found: [4]"
+                requestId: 3b9e0c1d2f4a4b6c8d0e1f2a3b4c5d6e
+                timestamp: "2026-10-30T14:05:12.481+03:00"
+                violations: null
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: |
+            FORBIDDEN. Hesap bu gönderimi yapamaz; `message` şunlardan biridir:
+
+            | `message` | Anlamı |
+            |---|---|
+            | `account is not activated for this operation` | Hesapta SMS gönderimi etkin değil. |
+            | `sub user may not use the sms api` | Alt kullanıcının SMS API'sini kullanma izni yok. |
+            | `account operator is not served for this operation` | Hesabın operatörüne bu uç noktadan hizmet verilmiyor. |
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "422":
+          description: |
+            İstek geçerli ama gönderim yapılamaz. `code` ve `message`:
+
+            | `code` | `message` | Anlamı ve çözüm |
+            |---|---|---|
+            | `REJECTED_HEADER` | `NO_HEADERS_REGISTERED` | Hesapta kayıtlı başlık yok. |
+            | `REJECTED_HEADER` | `NOT_REGISTERED` | `sender` hesaba kayıtlı değil. Kayıtlı başlıkları `GET /senders` ile görebilirsiniz. |
+            | `REJECTED_HEADER` | `CASE_MISMATCH` | Başlık kayıtlı ama büyük/küçük harfi farklı yazılmış; kayıtlı hâliyle göndermelisiniz. |
+            | `REJECTED_HEADER` | `ROUTING_CODE_MISSING` | Alfanümerik başlık için hesapta yönlendirme kodu tanımlı değil. |
+            | `REJECTED_HEADER` | `SUBSCRIBER_NUMBER_RESTRICTED` | Hesapta abone numarasından gönderim kısıtlı. |
+            | `REJECTED_IYS` | `sender header has no iys brand code` | `BRAND` ya da `RETAILER` filtresi uygulanacak ama başlığın İYS marka kodu yok. |
+            | `REJECTED_IYS` | `account is not in iys mode, filtering cannot be applied` | Hesap İYS modunda değil; `iysFilter` `BRAND` ya da `RETAILER` olamaz. |
+            | `NO_DELIVERABLE_MESSAGES` | `all N messages rejected` | Doldurulan kayıtların hepsi reddedildi; görev oluşturulmadı. Hangi kaydın neden reddedildiği `rejectedItems` içindedir. |
+
+            Abone numarasından gönderime onaylı olmayan bir hesapta, tamamı rakamlardan oluşan bir `sender`
+            için `NOT_REGISTERED` ve `NO_HEADERS_REGISTERED` mesajlarının sonuna
+            ` (subscriber number headers were not offered)` eklenir.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [REJECTED_HEADER, REJECTED_IYS, NO_DELIVERABLE_MESSAGES]
+        "429":
+          description: RATE_LIMITED, `message` `template send rate limit exceeded`. Hesap başına dakikada 1000 istek aşıldı; `Retry-After` kadar bekleyip yeniden denemelisiniz.
+          headers:
+            Retry-After:
+              description: Yeniden denemeden önce beklenecek saniye.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [RATE_LIMITED]
+        "503":
+          description: SERVICE_UNAVAILABLE. Servis geçici olarak kullanılamıyor. Görev çoğunlukla kuyruğa alınmamıştır. Toplu gönderimi körlemesine yeniden göndermeden önce `GET /report` ile kontrol edebilirsiniz.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [SERVICE_UNAVAILABLE]
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /send/otp:
+    post:
+      tags: ["Gönderim"]
+      summary: OTP SMS gönderme
+      description: |
+        Tek bir alıcıya OTP (tek kullanımlık şifre) SMS'i gönderir. OTP, toplu SMS'ten ayrı bir kanaldan
+        anında gönderilir; her istek tek bir mesaj ve tek bir alıcıdır. 202 döndüğünde mesaj operatöre
+        iletilmiştir, teslim sonradan olur.
+
+        **Değerlerin işlenmesi.** Numara, gönderici ve metin gönderimden önce şu şekilde işlenir:
+
+        | Alan | İşlem |
+        |---|---|
+        | `recipient` | `5XXXXXXXXX`, `05XXXXXXXXX` ya da `905XXXXXXXXX` biçiminde; başına `+` eklenebilir. |
+        | `sender` | Büyük/küçük harf fark etmez. Abone numarası `5XXXXXXXXX`, `05XXXXXXXXX` ya da `905XXXXXXXXX` yazılabilir. |
+        | `text` | Baştaki ve sondaki boşluklar kırpılır; karakterler aşağıdaki tabloya göre çevrilir. Uzunluk çevrilmiş metin üzerinden sayılır. |
+
+        **Yeniden deneme.** 503 hiçbir şeyin gönderilmediğini gösterir; yeniden denemek güvenlidir.
+
+        **Raporlar.** OTP iletim raporları toplu gönderim raporlarından ayrı tutulur; `jobId`
+        `GET /report` ile sorgulanamaz.
+      operationId: sendOtp
+      parameters:
+        - name: x-client
+          in: header
+          required: false
+          schema:
+            type: string
+          description: >-
+            Kurumsal OTP hizmeti tanımlı hesaplar `enterprise` göndermelidir (küçük harfle, yazıldığı gibi).
+            Diğer hesaplar bu başlığı göndermez.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OtpSendRequest"
+            example:
+              sender: NETGSM
+              text: "Dogrulama kodunuz: 123456"
+              recipient: "905061234567"
+              appName: shop
+      responses:
+        "202":
+          description: OTP operatöre iletildi.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OtpSendResponse"
+              example:
+                jobId: "175518151237512050610525430"
+        "400":
+          description: |
+            INVALID_REQUEST. `message`:
+
+            | `message` | Ne zaman |
+            |---|---|
+            | `N field(s) rejected` | `sender`, `text` ya da `recipient` eksik veya boş. `violations` belirtir. |
+            | `request body could not be read as json` | Gövde JSON değil. |
+            | `recipient is not a valid number` | `recipient` bir Türkiye cep numarası değil. |
+            | `text is longer than 155 characters for this sender` | Çevrilmiş metin alfanümerik başlıkta 155, abone numarasında 160 karakteri aşıyor (`160` yazar). |
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: |
+            FORBIDDEN. Hesap bu gönderimi yapamaz; `message` şunlardan biridir:
+
+            | `message` | Anlamı |
+            |---|---|
+            | `account is not activated for this operation` | Hesapta SMS gönderimi etkin değil. |
+            | `sub user may not use the sms api` | Alt kullanıcının SMS API'sini kullanma izni yok. |
+            | `account operator is not served for this operation` | Hesap bu OTP hizmetine tanımlı değil: kurumsal OTP hesabı `x-client: enterprise` göndermeden ya da diğer hesaplar bu başlıkla istek yaptı. |
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [FORBIDDEN]
+        "422":
+          description: |
+            İstek geçerli ama gönderim yapılamaz. `code` ve `message`:
+
+            | `code` | `message` | Anlamı ve çözüm |
+            |---|---|---|
+            | `REJECTED_HEADER` | `NO_HEADERS_REGISTERED` | Hesapta kayıtlı başlık yok. |
+            | `REJECTED_HEADER` | `NOT_REGISTERED` | `sender` hesaba kayıtlı değil. Kayıtlı başlıkları `GET /senders` ile görebilirsiniz. |
+            | `REJECTED_HEADER` | `ROUTING_CODE_MISSING` | Alfanümerik başlık için hesapta yönlendirme kodu tanımlı değil. |
+            | `REJECTED_HEADER` | `SUBSCRIBER_NUMBER_RESTRICTED` | Hesapta abone numarasından gönderim kısıtlı. |
+            | `INSUFFICIENT_CREDIT` | `no credit, package or campaign to pay for the otp` | Hesabın OTP gönderimini karşılayacak kredisi, paketi ya da kampanyası yok. Hiçbir şey gönderilmedi; bakiye yükledikten sonra yeniden deneyebilirsiniz. |
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [REJECTED_HEADER, INSUFFICIENT_CREDIT]
+        "503":
+          description: SERVICE_UNAVAILABLE. Servis ya da OTP kanalı geçici olarak kullanılamıyor. Hiçbir şey gönderilmedi; yeniden denemek güvenlidir.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [SERVICE_UNAVAILABLE]
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /templates:
+    get:
+      tags: ["Template"]
+      summary: Template'leri listeleme
+      description: |
+        Hesabın `POST /send/template` ile kullanabileceği template'leri, en yenisi önce, sayfa sayfa listeler:
+        hesabın kendi template'leri ve herkese açık template'ler. Yalnızca hesabın kendi template'leri için
+        `includePublic=false` verilir. Boş bir sayfa da 200 döner.
+
+        Her template, gönderimde `params` içinde verilmesi gereken parametreleri ve her birinin kabul
+        ettiği değer türünü taşır.
+
+        **İstek sınırı.** Hesap başına dakikada 20 istek. Pencere ilk istekle başlar ve sabittir;
+        reddedilen istekler de sayılır. Aşıldığında 429 `Retry-After` başlığıyla döner.
+      operationId: listTemplates
+      parameters:
+        - name: includePublic
+          in: query
+          required: false
+          description: "`false` yalnızca hesabın kendi template'lerini listeler; herkese açık template'ler dahil edilmez."
+          schema:
+            type: boolean
+            default: true
+        - name: type
+          in: query
+          required: false
+          description: Template tipi, birebir eşleşir.
+          schema:
+            type: string
+            maxLength: 100
+          example: AUTH_OTP
+        - name: search
+          in: query
+          required: false
+          description: Açıklamada geçen metin; büyük/küçük harf fark etmez.
+          schema:
+            type: string
+            maxLength: 100
+        - name: content
+          in: query
+          required: false
+          description: Template metninde geçen metin; büyük/küçük harf fark etmez.
+          schema:
+            type: string
+            maxLength: 100
+        - name: page
+          in: query
+          required: false
+          description: Sıfırdan başlayan sayfa numarası.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: size
+          in: query
+          required: false
+          description: Sayfa başına template.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Bir sayfa template; en yenisi önce. Boş olabilir.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemplateListResponse"
+              example:
+                count: 1
+                page: 0
+                total: 1
+                totalPages: 1
+                templates:
+                  - templateId: 3
+                    content: "Dogrulama kodunuz: ${otpCode}"
+                    type: AUTH_OTP
+                    description: Giriş kodu
+                    public: false
+                    parameters:
+                      - name: otpCode
+                        type: BIGINT
+                        maxLength: null
+                    createdAt: "2026-05-18T11:25:12.502+03:00"
+        "400":
+          description: |
+            INVALID_REQUEST. `message` şunlardan biridir:
+
+            | `message` | Anlamı |
+            |---|---|
+            | `page must not be negative` | `page` negatif. |
+            | `size must be between 1 and 100` | `size` aralık dışında. |
+            | `type must be at most 100 characters` | Bir filtre (`type`, `search`, `content`) 100 karakterden uzun. |
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "429":
+          description: RATE_LIMITED, `message` `template list rate limit exceeded`. Hesap başına dakikada 20 istek aşıldı; `Retry-After` kadar bekleyip yeniden denemelisiniz.
+          headers:
+            Retry-After:
+              description: Yeniden denemeden önce beklenecek saniye.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [RATE_LIMITED]
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Failed"
+
+  /balance:
+    get:
+      tags: ["Hesap"]
+      summary: Bakiye sorgulama
+      description: |
+        Hesabın kalan paketlerini, kampanyalarını ve kredi bakiyesini döner. Hesap token'dan alınır.
+        Yanıt gövdesi API'nin genel kurallarına uymaz: `amount` metin ya da sayı olabilir,
+        kredi virgüllü metindir ve `stip=2` yanıtında bazı alanlar hiç bulunmayabilir.
+
+        Geçerli bir token yeterlidir; ayrıca bir yetki istenmez.
+
+        **Önbellek.** Aynı hesap, aynı `stip` ve aynı `service` için yanıt 10 saniye saklanır; bir
+        gönderimden hemen sonra okunan bakiye en fazla 10 saniye eski olabilir.
+
+        **İstek sınırı.** Hesap başına dakikada 60 istek. Pencere ilk istekle başlar ve sabittir; her
+        istek sayılır. Aşıldığında 429 `Retry-After` başlığıyla döner.
+      operationId: getBalance
+      parameters:
+        - name: stip
+          in: query
+          required: false
+          description: |
+            `1`: varlıklar türlerine göre. `2`: tek satırlık özet. `3`: varlıklar ve kredi bakiyesi.
+            Başka bir değer ya da hiç verilmemesi `1` sayılır; hata dönmez.
+          schema:
+            type: integer
+            enum: [1, 2, 3]
+            default: 1
+        - name: service
+          in: query
+          required: false
+          description: |
+            Listeyi bir hizmet grubuyla sınırlar: yalnızca o gruptaki hizmetlerin paket ve kampanyaları
+            döner. Verilmezse liste SMS gönderim hizmetinin varlıklarıdır.
+            Büyük/küçük harf fark etmez. Kredi bakiyesi bir hizmete ait değildir; listede yer almaz,
+            `stip=3` onu her zaman sona ekler. `stip=2` özeti bu parametreden etkilenmez.
+
+            | Değer | Grup |
+            |---|---|
+            | `sms` | SMS (giden, gelen, SMPP, flash, kısa numara, 0800 SMS, GSM ve M2M SMS); OTP SMS paketleri `otp`'dadır |
+            | `otp` | OTP ve OTP SMS paketleri |
+            | `ses` | Ses (giden, gelen, sesli mesaj, yönlendirme, telesekreter, 0800 çağrı, otomatik arama) |
+            | `fax` | Faks (giden, gelen) |
+            | `whatsapp` | WhatsApp |
+            | `santral` | Santral, SIP / NGN trunk, IP FCT, THK |
+            | `netsipp` | Netsipp |
+            | `gsm` | GSM hat, data, M2M, NetIOT, SIM kart |
+            | `internet` | İnternet, statik IP, alan adı, sunucu barındırma |
+            | `numara` | Numara kullanımı, özel numara, numara devri, MSISDN sorgulama |
+            | `ai` | Yapay zeka entegrasyonları |
+            | `ucret` | Tek seferlik ücretler ve fatura işlemleri |
+          schema:
+            type: string
+            enum: [sms, otp, ses, fax, whatsapp, santral, netsipp, gsm, internet, numara, ai, ucret]
+      responses:
+        "200":
+          description: |
+            `stip` 1 ve 3 için `BalanceListResponse`, `stip` 2 için `BalanceSummaryResponse`.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/BalanceListResponse"
+                  - $ref: "#/components/schemas/BalanceSummaryResponse"
+              examples:
+                stip3:
+                  summary: Varlıklar ve kredi (stip=3)
+                  value:
+                    balance:
+                      - amount: 277
+                        balance_name: Adet SMS
+                      - amount: "767"
+                        balance_name: Adet OTP SMS
+                      - amount: "242"
+                        balance_name: Dakika
+                      - amount: "92,150"
+                        balance_name: Kredi Bakiye
+                stip2Credit:
+                  summary: Özet, faturasız hesap, kredi var (stip=2)
+                  value:
+                    code: "00"
+                    balance: "92,150"
+                stip2Sms:
+                  summary: Özet, faturasız hesap, kredi yok, SMS var (stip=2)
+                  value:
+                    code: "00"
+                    balance: "277"
+                    type: AdetSMS
+                stip2Postpaid:
+                  summary: Özet, faturalı hesap (stip=2)
+                  value:
+                    code: "00"
+                    balance: "0"
+        "400":
+          description: INVALID_REQUEST, `message` `service must be one of sms, otp, ses, ...`. `service` tabloda olmayan bir değer.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [INVALID_REQUEST]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "429":
+          description: RATE_LIMITED, `message` `balance rate limit exceeded`. Hesap başına dakikada 60 istek aşıldı; `Retry-After` kadar bekleyip yeniden denemelisiniz.
+          headers:
+            Retry-After:
+              description: Yeniden denemeden önce beklenecek saniye.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiError"
+                  - properties:
+                      code:
+                        enum: [RATE_LIMITED]
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "500":
+          $ref: "#/components/responses/Failed"
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: Bearer erişim token'ı. Herhangi bir gövde okunmadan önce kontrol edilir.
+
+  responses:
+    Unauthenticated:
+      description: UNAUTHENTICATED. Bearer token yok ya da token geçersiz veya süresi dolmuş; `message` `no bearer token` ya da `invalid or expired token`.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ApiError"
+              - properties:
+                  code:
+                    enum: [UNAUTHENTICATED]
+    Unavailable:
+      description: SERVICE_UNAVAILABLE. Hiçbir şey yapılmadı; yeniden denemek güvenlidir.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ApiError"
+              - properties:
+                  code:
+                    enum: [SERVICE_UNAVAILABLE]
+    RateLimited:
+      description: RATE_LIMITED. Hesap için bu uç noktanın sınırı aşıldı; `message` sınırı belirtir. `Retry-After` yalnızca hesabın gönderimi askıya alındığında bulunmaz.
+      headers:
+        Retry-After:
+          description: İsteğin tekrarlanabileceği zamana kadar kalan tam saniye.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ApiError"
+              - properties:
+                  code:
+                    enum: [RATE_LIMITED]
+    Failed:
+      description: INTERNAL_ERROR, `message` `internal error`. Beklenmeyen hata; bildirirken `requestId` değerini paylaşmanız gerekir.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ApiError"
+              - properties:
+                  code:
+                    enum: [INTERNAL_ERROR]
+
+  schemas:
+    BalanceListResponse:
+      type: object
+      required: [balance]
+      properties:
+        balance:
+          type: array
+          description: Her varlık türü için bir kayıt. Hiç varlık yoksa boş liste. `stip=3` sonuna her zaman `Kredi Bakiye` kaydını ekler.
+          items:
+            $ref: "#/components/schemas/BalanceEntry"
+
+    BalanceEntry:
+      type: object
+      required: [amount, balance_name]
+      properties:
+        amount:
+          description: |
+            Kalan miktar. Metin ya da sayı olabilir: bir türün tek kaydı varsa metin (`"767"`), birden fazla
+            kaydı toplanmışsa sayı (`277`, `242.5`). `Kredi Bakiye` kaydında TL cinsinden, virgülle ve üç
+            ondalık basamakla metin (`"92,150"` = 92,15 TL).
+          oneOf:
+            - type: string
+            - type: number
+        balance_name:
+          type: string
+          description: Varlığın adı, örneğin `Adet SMS`, `Adet OTP SMS`, `Dakika`, `Kredi Bakiye`. Liste sabit değildir; hesaptaki ürünlere göre değişir.
+
+    BalanceSummaryResponse:
+      type: object
+      required: [code]
+      description: "`stip=2` özeti. `balance` ve `type` yalnızca ilgili durumda bulunur."
+      properties:
+        code:
+          type: string
+          enum: ["00"]
+        balance:
+          type: string
+          description: |
+            Faturasız hesapta kredi varsa TL kredi (`"92,150"`), yoksa kalan SMS adedi (`"277"`, `type`
+            ile birlikte). Faturalı hesapta her zaman `"0"`. Faturasız hesapta ikisi de yoksa bulunmaz.
+        type:
+          type: string
+          enum: [AdetSMS]
+          description: Yalnızca `balance` SMS adedi olduğunda bulunur.
+
+    SmsSendRequest:
+      type: object
+      required: [sender, messages]
+      properties:
+        sender:
+          type: string
+          minLength: 1
+          maxLength: 35
+          description: >-
+            Gönderici başlığı. Hesaba kayıtlı bir başlıkla yazıldığı gibi birebir eşleşmelidir: büyük/küçük
+            harf dahil, kırpma yapılmaz. Alfanümerik bir başlık (örneğin `NETGSM`) ya da hesabın abone
+            numarası olabilir; abone numarası başında `0` ya da `90` olmadan yazılır (`5061234567`).
+            Kullanabileceğiniz başlıkları ve her birinin kullanılabilir olup olmadığını
+            `GET /senders` ile görebilirsiniz. Eşleşmezse istek 422 `REJECTED_HEADER` ile reddedilir; boş ya da yalnızca boşluktan
+            oluşan bir değer ise 400 ile reddedilir.
+          example: NETGSM
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 1000000
+          description: >-
+            Gönderilecek mesajlar; her alıcı için bir kayıt. En az 1, en fazla 1.000.000 kayıt; fazlası
+            400 ile reddedilir.
+          items:
+            $ref: "#/components/schemas/SmsMessage"
+        encoding:
+          type: string
+          enum: [DEFAULT, TURKISH, UNICODE]
+          default: DEFAULT
+          description: |
+            Metnin karakter kodlaması. Tüm kayıtlara uygulanır. Büyük/küçük harfe duyarlıdır; listede
+            olmayan bir değer (`turkish`, `GSM` dahil) istek 400 `1 field(s) rejected` ile reddedilir;
+            `violations` alanı (`encoding`) ve geçerli değerleri belirtir.
+
+            | Değer | Ne zaman | En fazla uzunluk |
+            |---|---|---|
+            | `DEFAULT` | Standart GSM alfabesi. Türkçe karakterler Latin karşılıklarına çevrilir (ç→c, ş→s gibi). | 917 |
+            | `TURKISH` | Türkçe karakterlerin (çğıöşüÇĞİÖŞÜ) korunması gerektiğinde. `çğışĞİŞ` iki karakter sayılır. | 888 |
+            | `UNICODE` | Emoji ya da Arapça, Kiril gibi GSM alfabesinde olmayan karakterler için. | 396 |
+
+            Alfanümerik bir gönderici başlığında her sınır 5 karakter azdır. Sınırı aşan kayıt
+            `MESSAGE_TOO_LONG` ile reddedilir. Bir metnin kaç SMS'e bölüneceğini `POST /length` ile
+            hesaplayabilirsiniz.
+        iysFilter:
+          description: |
+            İYS (İleti Yönetim Sistemi) izin filtresi; ticari iletilerde alıcının izni olmayanlar gönderimden
+            çıkarılır. Büyük/küçük harf fark etmez:
+
+            | Değer | Anlamı |
+            |---|---|
+            | `NONE` | Filtre yok. Yalnızca bilgilendirme (ticari olmayan) iletiler için. |
+            | `BRAND` | Marka adına alınmış izinlere göre filtrelenir. |
+            | `RETAILER` | Bayi adına alınmış izinlere göre filtrelenir. |
+            | `BRAND_AND_RETAILER` | Her ikisine göre filtrelenir. |
+
+            Bunların dışındaki her değer `NONE` sayılır. Hesap ticari gönderim (marka ya da bayi) tipinde
+            tanımlıysa istekteki değer yok sayılır ve hesabın tipi uygulanır.
+
+            `BRAND` ya da `RETAILER` uygulanacaksa göndericinin İYS marka kodu olmalıdır; hesap İYS
+            modunda değilse bu iki değer istek 422 `REJECTED_IYS` ile reddedilir. `BRAND_AND_RETAILER`
+            için bu iki kontrol yapılmaz.
+          default: NONE
+          type: string
+          enum: [NONE, BRAND, RETAILER, BRAND_AND_RETAILER]
+        startAt:
+          type: string
+          format: date-time
+          description: >-
+            En erken gönderim zamanı, saat dilimi farkıyla (`2026-09-10T09:00:00+03:00`). Verilmezse ya da
+            geçmişteyse gönderim hemen başlar. 18 aydan daha ilerisi 400 `INVALID_SEND_WINDOW` ile
+            reddedilir. Bir dakikadan daha ileri bir başlangıç görevi `SCHEDULED` yapar. Saat dilimi farkı
+            olmayan ya da okunamayan bir tarih istek 400 ile reddedilir.
+        stopAt:
+          type: string
+          format: date-time
+          description: >-
+            En geç gönderim zamanı, saat dilimi farkıyla. Verilmezse ya da geçmişteyse `startAt` + 21 saat
+            kabul edilir. Aralık, 1000 ve üzeri mesajda 10
+            dakikadan, daha azında 5 dakikadan kısaysa bu süreye uzatılır; 21 saatten uzunsa 21 saate
+            kısaltılır. Bu düzeltmeler hata döndürmez ve belirlenen aralık yanıtta yer almaz.
+        partnerCode:
+          type: string
+          maxLength: 32
+          description: İş ortağı (bayi) kodu. Yalnızca kayıt amaçlıdır; gönderimi etkilemez.
+        referenceId:
+          type: string
+          maxLength: 50
+          description: Yanıtta aynen geri döndürülür.
+        appName:
+          type: string
+          maxLength: 50
+          description: Gönderimi yapan uygulamanın adı. Yalnızca kayıt amaçlıdır; gönderimi etkilemez.
+
+    SmsMessage:
+      type: object
+      required: [text, recipient]
+      description: >-
+        Tek bir alıcıya gidecek tek bir mesaj. Aynı metni birden fazla alıcıya göndermek için her alıcı
+        ayrı bir kayıt olarak eklenir. Hatalı bir kayıt isteğin tamamını reddettirmez; yalnızca o kayıt
+        `rejectedItems` içinde bildirilir.
+      properties:
+        text:
+          type: string
+          description: >-
+            Mesaj metni. Boş olamaz (`INVALID_MESSAGE`). En fazla uzunluk `encoding` değerine ve
+            göndericinin türüne bağlıdır (`MESSAGE_TOO_LONG`); bkz. `encoding` ve `/length`.
+          example: Siparişiniz kargoya verildi.
+        recipient:
+          type: string
+          pattern: "^(90\\d{10}|-\\d{9,17})$"
+          description: |
+            Alıcı numarası, iki biçimden biriyle yazılır; yalnızca rakamlar ve yurt dışı için baştaki tek `-`
+            kullanılabilir, boşluk, parantez ya da tire ayracı olmaz:
+
+            | Tür | Biçim | Örnek |
+            |---|---|---|
+            | Türkiye | `90` ve ardından 10 rakam; `+` ya da baştaki `0` olmadan | `+90 506 123 45 67` için `905061234567` |
+            | Yurt dışı | `-` ve ardından ülke koduyla birlikte 9–17 rakam; `+` ya da `00` olmadan | `+49 151 12345678` için `-4915112345678` |
+
+            Yanlış yazımlar: `+905061234567`, `05061234567`, `5061234567`, `0049151…`, `-+49151…`.
+            Bu biçimlere uymayan kayıt `INVALID_RECIPIENT` ile reddedilir. Numaranın gerçekte var olup
+            olmadığı ya da hangi operatöre ait olduğu burada denetlenmez; iletim sonucunu `GET /report` ile
+            görebilirsiniz. Hesabın yurt dışı gönderim izni yoksa yurt dışı kayıtlar `NO_INTERNATIONAL_PERMISSION`
+            ile reddedilir.
+          example: "905061234567"
+
+    TemplateSendRequest:
+      type: object
+      required: [sender, templates]
+      properties:
+        sender:
+          $ref: "#/components/schemas/SmsSendRequest/properties/sender"
+        templates:
+          type: array
+          minItems: 1
+          maxItems: 20
+          description: >-
+            Gönderilecek kayıtlar; her alıcı için bir template. En az 1, en fazla 20 kayıt. Kayıtlardan
+            biri hatalıysa (eksik alan, kullanılamayan template, uymayan parametre) istek 400 ile
+            reddedilir.
+          items:
+            $ref: "#/components/schemas/TemplateMessage"
+        encoding:
+          $ref: "#/components/schemas/SmsSendRequest/properties/encoding"
+        iysFilter:
+          $ref: "#/components/schemas/SmsSendRequest/properties/iysFilter"
+        startAt:
+          $ref: "#/components/schemas/SmsSendRequest/properties/startAt"
+        stopAt:
+          $ref: "#/components/schemas/SmsSendRequest/properties/stopAt"
+        partnerCode:
+          $ref: "#/components/schemas/SmsSendRequest/properties/partnerCode"
+        referenceId:
+          $ref: "#/components/schemas/SmsSendRequest/properties/referenceId"
+        appName:
+          $ref: "#/components/schemas/SmsSendRequest/properties/appName"
+
+    TemplateMessage:
+      type: object
+      required: [templateId, recipient]
+      description: Tek bir alıcıya gidecek, bir template'ten doldurulacak tek bir mesaj.
+      properties:
+        templateId:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Template'in kimliği. Hesabın kendi template'i ya da herkese açık bir template olmalıdır.
+          example: 3
+        recipient:
+          type: string
+          maxLength: 17
+          pattern: "^(90\\d{10}|-\\d{9,17})$"
+          description: >-
+            Alıcı numarası, `/send`'deki `recipient` ile aynı biçimde: Türkiye için `90` ve ardından 10
+            rakam, yurt dışı için `-` ve ardından 9–17 rakam. Boş ya da 17 karakterden uzunsa istek 400
+            ile reddedilir; biçime uymayan kayıt template doldurulduktan sonra `INVALID_RECIPIENT` ile
+            reddedilir.
+          example: "905061234567"
+        params:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Template'teki yer tutucuların değerleri: yer tutucu adı → değer. Template'in tanımladığı
+            parametrelerin hepsini boş olmayan değerlerle vermeli, template'te olmayan bir ad vermemelisiniz.
+            Yer tutucusu olmayan bir template'te alan verilmez. Değerler her zaman string olarak yazılır ve
+            parametrenin tanımlı türüne uymalıdır:
+
+            | Tür | Kabul edilen |
+            |---|---|
+            | `BIGINT` | Tam sayı, örn. `"123456"` |
+            | `FLOAT` | En fazla 4 ondalık basamaklı sayı, örn. `"12.50"` |
+            | `TEXT` | Template'te tanımlı uzunluğu aşmayan metin |
+            | `DATE` | `dd.MM.yyyy` ya da `dd/MM/yyyy` |
+            | `DATETIME` | `dd.MM.yyyy HH:mm[:ss]` ya da `dd/MM/yyyy HH:mm[:ss]` |
+          example:
+            otpCode: "123456"
+
+    OtpSendRequest:
+      type: object
+      required: [sender, text, recipient]
+      properties:
+        sender:
+          type: string
+          minLength: 1
+          description: >-
+            Gönderici başlığı: hesaba kayıtlı bir alfanümerik başlık (örneğin `NETGSM`) ya da hesabın abone
+            numarası. Büyük/küçük harf fark etmez. Abone numarası `5XXXXXXXXX`, `05XXXXXXXXX` ya da
+            `905XXXXXXXXX` yazılabilir. Kayıtlı başlıkları `GET /senders` ile görebilirsiniz.
+          example: NETGSM
+        text:
+          type: string
+          minLength: 1
+          description: |
+            OTP metni. Baştaki ve sondaki boşluklar kırpılır, karakterler gönderimden önce çevrilir:
+
+            | Metinde | Gönderilen |
+            |---|---|
+            | `ç ğ ı ö ş ü Ç Ğ İ Ö Ş Ü` | `c g i o s u C G I O S U` |
+            | `{ [` / `} ]` | `(` / `)` |
+            | `“` `”` `` ` `` | `"` |
+            | `‘ ’` | `'` |
+            | `~` | `?` |
+            | `€` | `;EO;` |
+            | sekme, `\|` | boşluk |
+            | `^` | silinir |
+            | satır sonu | `\n` (iki karakter) |
+            | diğer desteklenmeyen karakterler | `?` |
+
+            OTP her zaman tek SMS'tir. Çevrilmiş metin alfanümerik başlıkta en fazla 155, abone numarasında
+            en fazla 160 karakter olabilir; alfanümerik başlıkta sınır daha kısadır, çünkü operatör kodu
+            metnin sonuna eklenir.
+          example: "Dogrulama kodunuz: 123456"
+        recipient:
+          type: string
+          minLength: 1
+          description: >-
+            Alıcı, bir Türkiye cep numarası: `5XXXXXXXXX`, `05XXXXXXXXX` ya da `905XXXXXXXXX`;
+            başına `+` eklenebilir (`+905XXXXXXXXX`). Boşluk ya da yurt dışı numarası kabul edilmez.
+          example: "905061234567"
+        appName:
+          type: string
+          description: Gönderimi yapan uygulamanın adı. Yalnızca kayıt amaçlıdır.
+
+    OtpSendResponse:
+      type: object
+      required: [jobId]
+      properties:
+        jobId:
+          type: string
+          description: OTP gönderiminin kimliği. Bir sorun bildirirken paylaşmalısınız.
+          example: "175518151237512050610525430"
+
+    TemplateListResponse:
+      type: object
+      required: [count, page, total, totalPages, templates]
+      properties:
+        count:
+          type: integer
+          description: Bu sayfadaki template sayısı.
+        page:
+          type: integer
+          description: İstenen sayfa.
+        total:
+          type: integer
+          format: int64
+          description: Filtreye uyan template'lerin tüm sayfalardaki toplamı.
+        totalPages:
+          type: integer
+          description: Bu `size` ile toplam sayfa sayısı.
+        templates:
+          type: array
+          items:
+            $ref: "#/components/schemas/TemplateEntry"
+
+    TemplateEntry:
+      type: object
+      required: [templateId, content, type, description, public, parameters, createdAt]
+      description: Tüm alanlar her zaman bulunur; değeri olmayan bir alan `null` olarak gönderilir.
+      properties:
+        templateId:
+          type: integer
+          format: int64
+          description: Template'in kimliği; `POST /send/template` kayıtlarındaki `templateId`.
+          example: 3
+        content:
+          type: string
+          description: Template metni. Yer tutucular `${ad}` biçimindedir ve gönderimde `params` ile doldurulur.
+          example: "Dogrulama kodunuz: ${otpCode}"
+        type:
+          type: string
+          description: Template tipi, örn. `AUTH_OTP`, `SECURITY_ALERT`, `SERVICE_ALERT`.
+        description:
+          type: string
+          nullable: true
+          description: Template'in açıklaması.
+        public:
+          type: boolean
+          description: Herkese açık bir template'se `true`, hesabın kendi template'iyse `false`.
+        parameters:
+          type: array
+          description: Template'in yer tutucuları; gönderimde her birini `params` içinde vermelisiniz.
+          items:
+            type: object
+            required: [name, type, maxLength]
+            properties:
+              name:
+                type: string
+                description: Yer tutucunun adı; `params` anahtarı.
+                example: otpCode
+              type:
+                type: string
+                enum: [BIGINT, FLOAT, TEXT, DATE, DATETIME]
+                description: Kabul edilen değer türü; biçimleri `POST /send/template` `params` açıklamasındadır.
+              maxLength:
+                type: integer
+                nullable: true
+                description: En fazla değer uzunluğu; yalnızca `TEXT` için dolu.
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Template'in kayıt zamanı, saat dilimi farkıyla.
+          example: "2026-05-18T11:25:12.502+03:00"
+
+    SmsSendResponse:
+      type: object
+      description: Tüm alanlar her zaman bulunur; değeri olmayan bir alan `null` olarak gönderilir.
+      required: [jobId, status, accepted, rejected, rejectedItems, rejectedItemsTruncated, referenceId]
+      properties:
+        jobId:
+          type: string
+          description: Oluşturulan görevin numarası. Rapor, istatistik ve iptal için kullanılır; destek taleplerinde belirtmelisiniz.
+        status:
+          type: string
+          enum: [QUEUED, SCHEDULED]
+          description: |
+            | Değer | Anlamı |
+            |---|---|
+            | `QUEUED` | Gönderim hemen başladı; görev iptal edilemez. |
+            | `SCHEDULED` | Görev `startAt` zamanına kadar bekletiliyor (dakikaya göre bir dakikadan daha ileri bir başlangıç); o zamana kadar `POST /cancel` ile iptal edebilirsiniz. |
+        accepted:
+          type: integer
+          description: Gönderime alınan kayıt sayısı. `accepted + rejected`, istekteki kayıt sayısına eşittir.
+        rejected:
+          type: integer
+          description: Reddedilen kayıt sayısı. `rejectedItems` kısaltılsa da bu sayı tamdır.
+        rejectedItems:
+          type: array
+          maxItems: 100
+          description: Reddedilen kayıtlar, `index` sırasıyla ilk 100 tanesi. Hiçbiri reddedilmediyse boş dizi.
+          items:
+            $ref: "#/components/schemas/RejectedMessage"
+        rejectedItemsTruncated:
+          type: boolean
+          description: 100'den fazla kayıt reddedildiği için `rejectedItems` kısaltıldıysa `true`. `accepted` ve `rejected` yine tamdır.
+        referenceId:
+          type: string
+          nullable: true
+          description: İstekte verilen `referenceId`; verilmediyse `null`.
+
+    RejectedMessage:
+      type: object
+      required: [index, recipient, reason]
+      properties:
+        index:
+          type: integer
+          description: Kaydın istekteki `messages` dizisindeki sırası, sıfırdan başlar.
+        recipient:
+          type: string
+          nullable: true
+          description: Kayıttaki alıcı. Kayıt `null` ise ya da alıcısı yoksa `null`.
+        reason:
+          type: string
+          enum: [INVALID_RECIPIENT, INVALID_MESSAGE, MESSAGE_TOO_LONG, MALFORMED_ENTRY, DUPLICATE_RECIPIENT, NO_INTERNATIONAL_PERMISSION]
+          description: |
+            | Değer | Ne zaman |
+            |---|---|
+            | `INVALID_RECIPIENT` | Numara eksik ya da biçimi yanlış; bkz. `recipient`. |
+            | `INVALID_MESSAGE` | Metin eksik ya da boş. |
+            | `MESSAGE_TOO_LONG` | Metin, `encoding` ve gönderici türüne göre sınırı aşıyor; bkz. `encoding`. |
+            | `MALFORMED_ENTRY` | Kayıt `null`. |
+            | `DUPLICATE_RECIPIENT` | Aynı alıcı istekte daha sonra yeniden geçiyor. Yalnızca son geçen kayıt gönderilir, öncekiler bu nedenle reddedilir; son kayıt başka bir nedenle reddedilse bile. Numaralar yazıldığı gibi karşılaştırılır. Mükerrer gönderime izin verilen hesaplarda uygulanmaz. |
+            | `NO_INTERNATIONAL_PERMISSION` | Numara yurt dışı (`-` ile başlıyor) ve hesabın yurt dışı gönderim izni yok. İzin için destek ekibiyle iletişime geçmelisiniz. Yalnızca başka bir hatası olmayan kayıtlarda bildirilir. |
+
+            Bir kayıt birden fazla nedenle hatalıysa tek neden bildirilir; öncelik: `DUPLICATE_RECIPIENT`,
+            `MALFORMED_ENTRY`, `MESSAGE_TOO_LONG`, `INVALID_RECIPIENT`, `INVALID_MESSAGE`,
+            `NO_INTERNATIONAL_PERMISSION`.
+
+    InboxResponse:
+      type: object
+      required: [count, messages, truncated]
+      properties:
+        count:
+          type: integer
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxMessage"
+        truncated:
+          type: boolean
+          description: >-
+            500 mesaj sınırına ulaşıldığında ve aralıkta daha fazlası olabileceğinde true; geri
+            kalanı için daha dar bir aralık sorgulamalısınız. count 500'ün altındayken de true olabilir.
+
+    InboxMessage:
+      type: object
+      required: [id, jobId, sender, text, operator, receivedAt]
+      properties:
+        id:
+          type: string
+          nullable: true
+        jobId:
+          type: string
+          nullable: true
+          description: Mesajın ait olduğu görev, atanmışsa; aksi halde `null`.
+        sender:
+          type: string
+          nullable: true
+          description: Mesajın geldiği numara; yurt içi numaralar 90 öneki olmadan yazılır.
+        text:
+          type: string
+          nullable: true
+        operator:
+          type: string
+          nullable: true
+          description: Mesajın geldiği operatörün adı (örn. NETGSM MOBIL). Bir ad, kod değil.
+        receivedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Mesajın alındığı zaman, saat dilimi farkı içeren ISO-8601. Zaman bilgisi yoksa `null`.
+
+    ReportResponse:
+      type: object
+      required: [count, page, reports]
+      properties:
+        count:
+          type: integer
+        page:
+          type: integer
+        reports:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReportEntry"
+
+    ReportEntry:
+      type: object
+      description: Her satırda sekiz alanın tamamı bulunur; değeri olmayan bir alan `null` olarak gönderilir.
+      required: [jobId, number, status, operator, messageLength, deliveredAt, failReason, referenceId]
+      properties:
+        jobId:
+          type: string
+          nullable: true
+        number:
+          type: string
+          nullable: true
+          description: Alıcı numarası; yurt içi numaralar 90 öneki olmadan yazılır.
+        status:
+          type: string
+          enum: [PENDING, DELIVERED, NOT_DELIVERED]
+          nullable: true
+          description: |
+            İletim sonucu. Durum bilgisi yoksa `null`.
+
+            | Değer | Anlamı |
+            |---|---|
+            | `PENDING` | Bekliyor |
+            | `DELIVERED` | İletildi |
+            | `NOT_DELIVERED` | İletilmedi; nedeni `failReason` alanındadır |
+        operator:
+          type: string
+          enum: [VODAFONE, TURK_TELEKOM, TURKCELL, NETGSM, AKONTEL, INTERNATIONAL, UNKNOWN]
+          nullable: true
+          description: Mesajın gittiği operatör. VODAFONE, TURK_TELEKOM, TURKCELL, NETGSM, AKONTEL, yurt dışı numaralar için INTERNATIONAL; tanınmayan bir operatör için UNKNOWN. Operatör bilgisi yoksa `null`.
+        messageLength:
+          type: integer
+          nullable: true
+          description: Mesajın kapladığı SMS parça sayısı.
+        deliveredAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: İletildiği zaman. Yalnızca `status` DELIVERED olduğunda dolu; başarısızlar dahil diğer tüm satırlarda `null`.
+        failReason:
+          type: string
+          enum: [INVALID_NUMBER, NOT_SENT_TO_OPERATOR, OPERATOR_REJECTED, OPERATOR_ERROR, SEND_ERROR, DUPLICATE, INSUFFICIENT_CREDIT, BLACKLISTED, IYS_REJECTED, IYS_ERROR, MESSAGE_NOT_CREATED, INVALID_NUMBER_FORMAT, NTS_NOT_APPROVED, REPORT_NOT_FORWARDED, NO_INTERNATIONAL_PERMISSION, TIMEOUT, SMS_DISABLED_ON_DEVICE, DEVICE_NOT_SUPPORTED, ROUTING_FAILED, OPERATOR_TIMEOUT, UNKNOWN_SUBSCRIBER, ILLEGAL_SUBSCRIBER, SYSTEM_ERROR, UNKNOWN]
+          nullable: true
+          description: |
+            İletilmeme nedeni. Yalnızca `status` `NOT_DELIVERED` olduğunda dolu, aksi halde `null`.
+
+            | Değer | Anlamı |
+            |---|---|
+            | `INVALID_NUMBER` | Hatalı numara. Yurt dışı bir numarada, hesabın yurt dışı gönderim izni olmadığı anlamına da gelebilir: izin gönderim sırasında denetlenir (`NO_INTERNATIONAL_PERMISSION`), ama kayıt kabul edildikten sonra izin kaldırılırsa kayıt burada bu kodla döner. |
+            | `NOT_SENT_TO_OPERATOR` | Operatöre gönderilemedi |
+            | `OPERATOR_REJECTED` | Operatör kabul etmedi |
+            | `OPERATOR_ERROR` | Operatör hatası |
+            | `SEND_ERROR` | Gönderim hatası |
+            | `DUPLICATE` | Mükerrer gönderim |
+            | `INSUFFICIENT_CREDIT` | Kredi yetersiz |
+            | `BLACKLISTED` | Numara kara listede |
+            | `IYS_REJECTED` | İYS reddi |
+            | `IYS_ERROR` | İYS kontrolü yapılamadı |
+            | `MESSAGE_NOT_CREATED` | Mesaj oluşturulamadı |
+            | `INVALID_NUMBER_FORMAT` | Hatalı numara biçimi |
+            | `NTS_NOT_APPROVED` | NTS onayı alınamadı |
+            | `REPORT_NOT_FORWARDED` | Rapor iletilemedi |
+            | `NO_INTERNATIONAL_PERMISSION` | Hesabın yurt dışı gönderim izni yok |
+            | `TIMEOUT` | Zaman aşımı |
+            | `SMS_DISABLED_ON_DEVICE` | Mobil cihaz SMS almaya kapalı |
+            | `DEVICE_NOT_SUPPORTED` | Mobil cihaz desteklemiyor |
+            | `ROUTING_FAILED` | Yönlendirme başarısız |
+            | `OPERATOR_TIMEOUT` | Hedef operatörde zaman aşımı oluştu |
+            | `UNKNOWN_SUBSCRIBER` | Tanımlanamayan abone |
+            | `ILLEGAL_SUBSCRIBER` | Uyumsuz abone |
+            | `SYSTEM_ERROR` | Sistemsel hata |
+            | `UNKNOWN` | Tanımlı olmayan bir neden |
+        referenceId:
+          type: string
+          nullable: true
+          description: İletim raporunun referansı. Yoksa `null`.
+
+    SendersResponse:
+      type: object
+      required: [count, senders]
+      properties:
+        count:
+          type: integer
+        senders:
+          type: array
+          items:
+            $ref: "#/components/schemas/SenderEntry"
+
+    SenderEntry:
+      type: object
+      required: [name, type, brandCode, usable, reason]
+      properties:
+        name:
+          type: string
+          nullable: true
+          description: Kayıtlı hâliyle başlık - bir gönderimde `sender` için kullanılacak değer. Abone numaraları yalın numaradır.
+        type:
+          type: string
+          enum: [ALPHANUMERIC, SUBSCRIBER_NUMBER, UNKNOWN]
+        brandCode:
+          type: integer
+          format: int64
+          description: Kayıtlı İYS marka kodu; başlığın yoksa 0. Her zaman bulunur.
+        usable:
+          type: boolean
+          description: Bu başlıktan yapılacak bir gönderimin bu hesap için kabul edilip edilmeyeceği.
+        reason:
+          type: string
+          enum: [ROUTING_CODE_MISSING, SUBSCRIBER_NUMBER_RESTRICTED]
+          nullable: true
+          description: Yalnızca usable false olduğunda dolu, aksi halde `null`. Gönderimin reddederken kullandığı adın aynısı. ROUTING_CODE_MISSING, hesapta yönlendirme kodu tanımlı olmadığı için bu başlıktan gönderim yapılamayacağı anlamına gelir; alfanümerik başlıklar yönlendirme kodu gerektirir. SUBSCRIBER_NUMBER_RESTRICTED, hesapta abone numaralarından SMS gönderiminin kısıtlı olduğu anlamına gelir; abone numarası başlıkları için onaylı olmayan hesaplar bunları hiç görmez.
+
+    DefaultSenderResponse:
+      type: object
+      required: [sender]
+      properties:
+        sender:
+          # 3.0 has no type "null": allOf + nullable is the 3.0 way to say "SenderEntry or null"
+          allOf:
+            - $ref: "#/components/schemas/SenderEntry"
+          nullable: true
+          description: Varsayılan ayarlanmamışsa null.
+
+    DefaultSenderChangeRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Varsayılan yapılacak başlık, birebir kayıtlı hâliyle - büyük/küçük harf dahil, kırpma yapılmaz, 0 ya da 90 öneki olmaz.
+
+    CancelRequest:
+      type: object
+      required: [jobId]
+      properties:
+        jobId:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: "`POST /send` yanıtındaki `jobId`, yazıldığı gibi; kırpma yapılmaz."
+
+    CancelResponse:
+      type: object
+      required: [jobId, cancelledAt]
+      properties:
+        jobId:
+          type: string
+          description: İptal edilen görev; istekteki `jobId`, aynen.
+        cancelledAt:
+          type: string
+          format: date-time
+          description: İptalin onaylandığı zaman, saat dilimi farkıyla.
+
+    StatsResponse:
+      type: object
+      required: [jobId, month, count, stats]
+      properties:
+        jobId:
+          type: string
+        month:
+          type: string
+          description: Aranan ay, yyyy-MM.
+        count:
+          type: integer
+        stats:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/StatEntry"
+
+    StatEntry:
+      type: object
+      required: [status, failReason, messageCount, totalParts, domestic, charging, chargeDescription]
+      description: Her satırda tüm alanlar bulunur; değeri olmayan bir alan `null` olarak gönderilir.
+      properties:
+        status:
+          type: string
+          enum: [PENDING, DELIVERED, NOT_DELIVERED]
+          nullable: true
+          description: Sonuç; `GET /report` yanıtındaki `status` ile aynı değerler.
+        failReason:
+          type: string
+          enum: [INVALID_NUMBER, NOT_SENT_TO_OPERATOR, OPERATOR_REJECTED, OPERATOR_ERROR, SEND_ERROR, DUPLICATE, INSUFFICIENT_CREDIT, BLACKLISTED, IYS_REJECTED, MESSAGE_NOT_CREATED, TIMEOUT, UNKNOWN]
+          nullable: true
+          description: |
+            İletilmeme nedeni. Yalnızca `status` `NOT_DELIVERED` olduğunda dolu, aksi halde `null`. Değerler
+            `GET /report` yanıtındaki `failReason` ile aynı adlardır, ancak istatistiklerde yalnızca bu listedekiler
+            görülür. Tanınmayan bir neden `UNKNOWN` olarak döner.
+
+            Aynı neden birden fazla satırda yer alabilir: satırlar, ücretlendirmenin yanı sıra iç sonuç koduna göre
+            de ayrılır ve birden fazla iç kod aynı nedene karşılık gelebilir (örneğin iki ayrı `INVALID_NUMBER`
+            satırı, ikisi de `charged`). Neden başına toplam için aynı `failReason` değerini taşıyan
+            satırların `messageCount` değerlerini toplamalısınız.
+        messageCount:
+          type: integer
+          nullable: true
+          description: Bu şekilde sonuçlanan alıcı sayısı.
+        totalParts:
+          type: integer
+          format: int64
+          nullable: true
+          description: Bu alıcıların kapladığı SMS parçalarının toplamı.
+        domestic:
+          type: boolean
+        charging:
+          type: string
+          nullable: true
+          description: Ücretlendirme durumu - `charged`, `refunded` ya da `uncharged`.
+          example: charged
+        chargeDescription:
+          type: string
+          nullable: true
+          description: Ücretlendirme hakkında bir cümle. Hiçbir ücret alınmadıysa `null`.
+
+    WebhookRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          maxLength: 1024
+          description: Host'u yalnızca genel (public) adreslere çözümlenen mutlak bir http ya da https URL - loopback, özel, link-local ya da başka bir şekilde iç adres olamaz. Port verilirse 1 ile 65535 arasındadır.
+        headers:
+          type: string
+          maxLength: 500
+          description: 'Webhook adresinizin Netgsm''den beklediği başlık; örneğin adresiniz bir kimlik doğrulama bilgisi istiyorsa "Authorization: Bearer <token>". Netgsm bu başlığı adresinize yaptığı her istekte aynen gönderir; böylece isteğin Netgsm''den geldiğini doğrulayabilirsiniz. Tek bir satır, `Name: value` biçiminde; yalnızca yazdırılabilir ASCII, satır sonu olmadan. Değer virgül (,) ya da iki nokta üst üste (:) içeremez. İsteğe bağlı; boş bırakılırsa ek başlık gönderilmez.'
+
+    WebhookResponse:
+      type: object
+      required: [url, headers, registeredAt]
+      properties:
+        url:
+          type: string
+        headers:
+          type: string
+          nullable: true
+          description: Kayıtta verilen başlık satırı; verilmediyse `null`.
+        registeredAt:
+          type: string
+          format: date-time
+          description: Webhook'un kaydedildiği zaman.
+
+    ReportWebhookPayload:
+      type: object
+      required: [numbers]
+      description: İletim raporu webhook'unun gövdesi. Alan adları `GET /report` yanıtındakilerden farklıdır.
+      properties:
+        numbers:
+          type: array
+          description: Bu istekle gönderilen raporlar; her alıcı için bir satır.
+          items:
+            $ref: "#/components/schemas/ReportWebhookEntry"
+
+    ReportWebhookEntry:
+      type: object
+      properties:
+        jobid:
+          type: string
+          description: Send uç noktasının döndürdüğü görev numarası (`jobId`).
+        number:
+          type: string
+          description: Alıcı numarası.
+        status:
+          type: integer
+          description: |
+            İletim sonucu, sayısal kod. Bekleyen (henüz sonuçlanmamış) gönderimler webhook ile
+            bildirilmez; yalnızca sonuçlananlar gelir.
+
+            | Kod | Anlamı | `GET /report` karşılığı |
+            |---|---|---|
+            | `1` | İletildi | `DELIVERED` |
+            | `2` | Ulaştırılamadı; nedeni `errorCode` alanındadır | `NOT_DELIVERED` |
+            | `3` | Hatalı numara | `NOT_DELIVERED`, `INVALID_NUMBER` |
+            | `4` | Operatöre gönderilemedi | `NOT_DELIVERED`, `NOT_SENT_TO_OPERATOR` |
+            | `8` | Operatör kabul etmedi | `NOT_DELIVERED`, `OPERATOR_REJECTED` |
+            | `11` | Operatör hatası | `NOT_DELIVERED`, `OPERATOR_ERROR` |
+            | `12` | Gönderim hatası | `NOT_DELIVERED`, `SEND_ERROR` |
+            | `13` | Mükerrer | `NOT_DELIVERED`, `DUPLICATE` |
+            | `14` | Kredisi yetmedi | `NOT_DELIVERED`, `INSUFFICIENT_CREDIT` |
+            | `15` | Kara liste | `NOT_DELIVERED`, `BLACKLISTED` |
+            | `16` | İYS ret | `NOT_DELIVERED`, `IYS_REJECTED` |
+            | `17` | İYS hata | `NOT_DELIVERED`, `IYS_ERROR` |
+            | `18` | Mesaj oluşturulamadı | `NOT_DELIVERED`, `MESSAGE_NOT_CREATED` |
+            | `19` | Hatalı numara formatı | `NOT_DELIVERED`, `INVALID_NUMBER_FORMAT` |
+            | `20` | NTS'den onay alınamadı | `NOT_DELIVERED`, `NTS_NOT_APPROVED` |
+            | `22` | Yurt dışı gönderim izni yok | `NOT_DELIVERED`, `NO_INTERNATIONAL_PERMISSION` |
+        operator:
+          type: integer
+          description: |
+            Alıcının operatörü, sayısal kod.
+
+            | Kod | Operatör | `GET /report` karşılığı |
+            |---|---|---|
+            | `10` | Vodafone | `VODAFONE` |
+            | `20` | Türk Telekom | `TURK_TELEKOM` |
+            | `30` | Turkcell | `TURKCELL` |
+            | `40`, `41`, `43` | Netgsm | `NETGSM` |
+            | `45` | Akontel | `AKONTEL` |
+            | `210`–`218` | Yurt dışı | `INTERNATIONAL` |
+
+            Operatörü belirlenemeyen kayıtlarda (örneğin numara hatalıysa) `0` gelir.
+        msglen:
+          type: integer
+          description: Mesajın kapladığı SMS parça sayısı.
+        deliveredDate:
+          type: string
+          description: İletildiği zaman, `yyyy-MM-dd HH:mm:ss` biçiminde, Türkiye saatiyle. Tarih bilgisi yoksa boş string (`""`).
+        errorCode:
+          type: integer
+          nullable: true
+          description: |
+            İletilmeme nedeni. **Yalnızca `status` `2` olduğunda anlamlıdır**; diğer durumlarda
+            nedeni `status` belirtir ve bu alanın değeri dikkate alınmamalıdır.
+
+            | Kod | Anlamı | `GET /report` `failReason` |
+            |---|---|---|
+            | `111` | Zaman aşımı | `TIMEOUT` |
+            | `112` | Mobil cihaz SMS gönderimine kapalı | `SMS_DISABLED_ON_DEVICE` |
+            | `113` | Mobil cihaz desteklemiyor | `DEVICE_NOT_SUPPORTED` |
+            | `114` | Yönlendirme başarısız | `ROUTING_FAILED` |
+            | `115` | Hedef operatörden zaman aşımı | `OPERATOR_TIMEOUT` |
+            | `116` | Tanımlanamayan abone | `UNKNOWN_SUBSCRIBER` |
+            | `117` | Yasadışı abone | `ILLEGAL_SUBSCRIBER` |
+            | `119` | Sistemsel hata | `SYSTEM_ERROR` |
+
+            `status` `2` iken `0` ya da `null` gelirse neden bilinmiyordur (`GET /report`'ta `UNKNOWN`).
+        referansID:
+          type: string
+          nullable: true
+          description: Gönderimde verilen referans (`GET /report` yanıtındaki `referenceId`). Verilmediyse `null`.
+
+    InboxWebhookPayload:
+      type: object
+      required: [messageId, messageDateTime, sourceNumber, content, subscriberNumber]
+      description: Gelen SMS webhook'unun gövdesi. Değeri olmayan alanlar boş string olarak gönderilir.
+      properties:
+        messageId:
+          type: string
+          description: Gelen mesajın kimliği.
+        messageDateTime:
+          type: string
+          description: Mesajın alındığı zaman, `yyyy-MM-dd HH:mm:ss` biçiminde, Türkiye saatiyle.
+        sourceNumber:
+          type: string
+          description: Mesajı gönderen numaranın son 10 hanesi (90 öneki olmadan).
+        content:
+          type: string
+          description: Mesaj metni.
+        subscriberNumber:
+          type: string
+          description: Mesajın geldiği, hesaba ait numara.
+
+    BlacklistResponse:
+      type: object
+      required: [count, page, number, numbers]
+      properties:
+        count:
+          type: integer
+          description: "`numbers` içindeki numara sayısı. Tek numara sorgusunda 0, numaranın kara listede olmadığını gösterir."
+        page:
+          type: integer
+          nullable: true
+          description: Döndürülen, sıfırdan başlayan sayfa. Tek numara sorgusunda `null`.
+        number:
+          type: string
+          nullable: true
+          description: Sorgulanan numara, aynen geri döndürülür. Sayfa isteğinde `null`.
+        numbers:
+          type: array
+          items:
+            type: string
+          description: Engellenen numaralar saklandığı biçimde, en yenisi önce.
+
+    LengthRequest:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          maxLength: 10000
+          description: Mesaj metni. Boş olabilir.
+        encoding:
+          type: string
+          enum: [DEFAULT, TURKISH, UNICODE]
+          default: DEFAULT
+        alphanumericSender:
+          type: boolean
+          default: false
+          description: NETGSM gibi bir metin başlığından gönderilip gönderilmeyeceği; bu beş karakter tutar. Gönderici bir metin başlığı olduğunda her zaman true olmalıdır; false bırakılırsa yanıt, send'in böyle bir başlıktan kabul ettiğinden beş karakter fazlasına izin verir.
+
+    LengthResponse:
+      type: object
+      required: [encoding, length, parts, limit, fits, remaining, remainingUntilNextPart]
+      properties:
+        encoding:
+          type: string
+          enum: [DEFAULT, TURKISH, UNICODE]
+        length:
+          type: integer
+          description: Send uç noktasının saydığı şekilde - TURKISH altında kaçışlı her Türkçe harf için iki, alfanümerik gönderici için artı beş.
+        parts:
+          type: integer
+          description: Metnin kapladığı SMS sayısı. Boş metin için sıfır.
+        limit:
+          type: integer
+          description: Gönderici maliyeti dahil `length` değerinin alabileceği en büyük değer. En uzun metin değildir - metin başlığı için beş eksiğidir. Ne kadar daha metin sığacağını `remaining` gösterir.
+        fits:
+          type: boolean
+          description: Send'in bu uzunlukta bir metni kabul edip etmeyeceği.
+        remaining:
+          type: integer
+          description: Sınıra kadar kalan karakter. Metin sınırı aşıyorsa aştığı kadar negatif.
+        remainingUntilNextPart:
+          type: integer
+          description: Bir SMS daha gerekmeden önce kalan karakter. Metin sığmıyorsa sıfır.
+
+    DirectorySendRequest:
+      type: object
+      required: [sender, text]
+      properties:
+        sender:
+          type: string
+          minLength: 1
+          maxLength: 35
+          description: >-
+            Gönderici başlığı, `POST /send`'deki gibi: hesaba kayıtlı bir başlıkla yazıldığı gibi birebir
+            eşleşmelidir, büyük/küçük harf dahil. Eşleşmezse istek 422 `REJECTED_HEADER` ile reddedilir.
+          example: NETGSM
+        text:
+          type: string
+          minLength: 1
+          maxLength: 917
+          description: >-
+            Mesaj metni; tüm alıcılara aynı metin gider, `addressType` ile kişiselleştirilebilir. En fazla
+            uzunluk `DEFAULT` için 917, `TURKISH` için 888 karakterdir (`çğışĞİŞ` iki karakter sayılır);
+            alfanümerik bir gönderici başlığında her sınır 5 karakter azdır. Sınırı aşan metin 400 ile
+            reddedilir.
+        encoding:
+          type: string
+          enum: [DEFAULT, TURKISH]
+          default: DEFAULT
+          description: >-
+            Metnin karakter kodlaması, `POST /send`'deki gibi. Büyük/küçük harfe duyarlıdır. `UNICODE`
+            bu uç noktada 400 ile reddedilir.
+        iysFilter:
+          description: >-
+            İYS filtresi; değerler `POST /send`'deki gibidir ve büyük/küçük harf fark etmez. Listede
+            olmayan bir değer `NONE` sayılır. Filtreyi platform uygular; bu başlık ya da hesap için
+            uygulanamıyorsa istek 422 `REJECTED_IYS` ile reddedilir.
+          default: NONE
+          type: string
+          enum: [NONE, BRAND, RETAILER, BRAND_AND_RETAILER]
+        groupIds:
+          type: array
+          items:
+            type: integer
+            format: int64
+          description: Hesabın rehberindeki kişi grupları.
+        contacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/DirectoryContact"
+        recipients:
+          type: array
+          items:
+            type: string
+          description: >-
+            Kişiselleştirme uygulanmayan düz numaralar. Yalnızca `groupIds` ya da `contacts` ile birlikte
+            kullanılabilir. Numaranın biçimini platform denetler.
+        address1:
+          type: string
+          maxLength: 500
+          description: Tüm alıcılar için aynı olan ön hitap, örneğin "Sayın". Kullanılıp kullanılmayacağını `addressType` belirler.
+        address2:
+          type: string
+          maxLength: 500
+          description: Tüm alıcılar için aynı olan son hitap, örneğin "Bey/Hanım,". Kullanılıp kullanılmayacağını `addressType` belirler.
+        addressType:
+          type: integer
+          minimum: 0
+          maximum: 17
+          default: 0
+          description: |
+            Mesaj metninin başına hangi kişisel bilgilerin ekleneceğini belirler. Seçilen parçalar aşağıdaki sırayla ve
+            aralarında birer boşlukla metnin başına eklenir; alıcıda boş olan parça atlanır. 0 ile 17 dışındaki bir değer
+            `INVALID_REQUEST` ile reddedilir.
+
+            - **Ad** ve **soyad**, rehberdeki kişi kaydından ya da `contacts` içindeki `name` ve `surname` alanlarından gelir.
+            - **Kişi hitabı**, rehberdeki kişinin hitap bilgisi ya da `contacts` içindeki `address` alanıdır; her alıcı için ayrıdır.
+            - `recipients` içinde düz numara olarak verilen alıcılara kişiselleştirme uygulanmaz.
+
+            | Değer | Metnin başına eklenen |
+            |---|---|
+            | `0` | Hiçbir şey; metin olduğu gibi gönderilir (varsayılan) |
+            | `1` | address1 + ad |
+            | `2` | address1 + ad + soyad |
+            | `3` | address1 + soyad |
+            | `4` | address1 + ad + address2 |
+            | `5` | address1 + ad + soyad + address2 |
+            | `6` | address1 + soyad + address2 |
+            | `7` | ad |
+            | `8` | soyad |
+            | `9` | ad + soyad |
+            | `10` | kişi hitabı |
+            | `11` | kişi hitabı + ad |
+            | `12` | kişi hitabı + ad + soyad |
+            | `13` | kişi hitabı + soyad |
+            | `14` | kişi hitabı + address2 |
+            | `15` | kişi hitabı + ad + address2 |
+            | `16` | kişi hitabı + ad + soyad + address2 |
+            | `17` | kişi hitabı + soyad + address2 |
+
+            Örnek: `addressType` 5, `address1` "Sayın", `address2` "Bey," ve metin "siparişiniz kargoya verildi." ise
+            Ahmet Yılmaz'a giden mesaj "Sayın Ahmet Yılmaz Bey, siparişiniz kargoya verildi." olur.
+        startAt:
+          type: string
+          format: date-time
+          description: >-
+            En erken gönderim zamanı, saat dilimi farkıyla. Europe/Istanbul saatine çevrilir ve dakikaya
+            yuvarlanır; saniyeler dikkate alınmaz.
+        stopAt:
+          type: string
+          format: date-time
+          description: >-
+            En geç gönderim zamanı, saat dilimi farkıyla; `startAt` gibi dakikaya yuvarlanır. `startAt`'tan
+            1 ile 21 saat sonra olmalıdır. Aralığı platform denetler; kabul etmezse istek 400
+            `INVALID_SEND_WINDOW` ile reddedilir.
+
+    DirectoryContact:
+      type: object
+      required: [number]
+      description: Bilgileriyle birlikte doğrudan verilen bir alıcı.
+      properties:
+        number:
+          type: string
+          minLength: 1
+          maxLength: 20
+          description: Alıcının numarası. Biçimini platform denetler.
+        name:
+          type: string
+          maxLength: 100
+          description: Alıcının adı. İsteğe bağlı.
+        surname:
+          type: string
+          maxLength: 100
+          description: Alıcının soyadı. İsteğe bağlı.
+        address:
+          type: string
+          maxLength: 500
+          description: Kişiye özel hitap, örneğin "Sayın". Kullanılıp kullanılmayacağını `addressType` belirler. İsteğe bağlı.
+
+    DirectorySendResponse:
+      type: object
+      required: [jobId, status, review]
+      properties:
+        jobId:
+          type: string
+          description: Oluşturulan görevin numarası. Rapor ve istatistik için kullanılır; destek taleplerinde belirtmelisiniz.
+        status:
+          type: string
+          enum: [QUEUED]
+          description: Her zaman `QUEUED`; `startAt` ileride olsa da.
+        review:
+          type: string
+          enum: [NONE, ADMIN_APPROVAL, FORBIDDEN_WORD, UNKNOWN]
+          description: |
+            Görevin gönderilmeden önce bekletilip bekletilmediği:
+
+            | Değer | Anlamı |
+            |---|---|
+            | `NONE` | Bekletilmedi; gönderim aralığında gönderilir. |
+            | `ADMIN_APPROVAL` | Yönetici onayı bekliyor: hesap onay kontrolünde ya da gönderim hesabın sınırından büyük. |
+            | `FORBIDDEN_WORD` | Metin yasaklı bir kelime içerdiği için bekletiliyor. |
+            | `UNKNOWN` | Görev kuyruğa alındı ama bekletme nedeni bilinmiyor. |
+
+    ApiError:
+      type: object
+      required: [code, message, requestId, timestamp, violations]
+      properties:
+        code:
+          type: string
+          enum:
+            - UNAUTHENTICATED
+            - SERVICE_UNAVAILABLE
+            - FORBIDDEN
+            - E_SIGNATURE_REQUIRED
+            - ALREADY_EXISTS
+            - NOT_FOUND
+            - INVALID_REQUEST
+            - INVALID_SEND_WINDOW
+            - REJECTED_HEADER
+            - REJECTED_IYS
+            - NO_DELIVERABLE_MESSAGES
+            - INSUFFICIENT_CREDIT
+            - RATE_LIMITED
+            - QUEUE_UNCONFIRMED
+            - INTERNAL_ERROR
+        message:
+          type: string
+          description: Okunabilir ayrıntı. `UNAUTHENTICATED` için `no bearer token` ya da `invalid or expired token`. `REJECTED_HEADER` için ret adıdır; yalnızca rakamlardan oluşan bir göndericide ` (subscriber number headers were not offered)` ekini taşıyabilir. `RATE_LIMITED` için sınırı belirtir; `FORBIDDEN` ve `REJECTED_IYS` için sabit bir cümledir. `SERVICE_UNAVAILABLE` ve `INTERNAL_ERROR` genel bir cümle taşır; bildirirken `requestId` değerini paylaşmanız gerekir.
+        requestId:
+          type: string
+          description: İsteğe özgü kimlik, 32 onaltılık karakter. Bir sorun bildirirken bu değeri paylaşmanız, isteğin kayıtlarda bulunmasını sağlar.
+        timestamp:
+          type: string
+          format: date-time
+        violations:
+          type: array
+          nullable: true
+          description: Yalnızca gövde doğrulamasından gelen INVALID_REQUEST için dolu, aksi halde `null`.
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+        rejectedItems:
+          type: array
+          maxItems: 100
+          description: >-
+            Yalnızca `NO_DELIVERABLE_MESSAGES` yanıtında bulunur; diğer hatalarda alan hiç yer almaz.
+            Reddedilen kayıtlar, `index` sırasıyla ilk 100 tanesi; 202 yanıtındaki `rejectedItems` ile
+            aynıdır.
+          items:
+            $ref: "#/components/schemas/RejectedMessage"
+        rejectedItemsTruncated:
+          type: boolean
+          description: Yalnızca `rejectedItems` ile birlikte bulunur. 100'den fazla kayıt reddedildiğinde true.

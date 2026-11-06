@@ -1,0 +1,37 @@
+# Bağımlılıklar ve derleme çıktıları
+node_modules/
+dist/
+*.zip
+packages/sms-mock/src/generated/
+coverage/
+*.tsbuildinfo
+
+# Gizli bilgiler ve yerel ayarlar
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.npmrc
+
+# Ajan / editör çalışma dosyaları
+.superpowers/
+.claude/settings.local.json
+.claude/worktrees/
+graphify-out/
+.idea/
+.vscode/
+nbproject/private/
+*.swp
+*~
+
+# İşletim sistemi
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Loglar
+*.log
+npm-debug.log*

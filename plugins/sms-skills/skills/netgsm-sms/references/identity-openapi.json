@@ -1,0 +1,1068 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Identity API",
+    "description": "Kimlik doğrulama servisi: kullanıcı adı / şifre ile token alma, token yenileme, oturum sonlandırma ve hesap bilgisi.\n\n## Akış\n\n1. `POST /auth/v3/token` ile kullanıcı adı, şifre ve istenen `scope` gönderilir; access ve refresh token alınır.\n2. Korunan uçlara `Authorization: Bearer {access_token}` başlığı ile istek atılır.\n3. Access token süresi dolduğunda `POST /auth/v3/token/refresh` ile yeni token çifti alınır. İstemci yanıttaki yeni değerleri saklamalıdır.\n4. Çıkışta `POST /auth/v3/token/revoke` çağrılır.\n\n## Scope\n\nToken alınırken `scope` alanı zorunludur ([RFC 6749 §3.3](https://www.rfc-editor.org/rfc/rfc6749#section-3.3)): boşlukla ayrılmış bir veya daha fazla kapsam (ör. `\"profile sms\"`). Yalnızca aşağıdaki değerler kabul edilir; boş veya tanınmayan bir kapsam içeren istek `422 validation_failed` döner. Token yanıtındaki `scope` alanı verilen kapsamı gösterir; yenilemede kapsam değişmez.\n\nAlt kapsamlar (`hizmet:işlem`, ör. `sms:send`) hizmetin yalnızca o işlemini kapsar. GSM hizmetleri ayrıdır (`hizmet:işlem:gsm`, ör. `sms:send:gsm`); `sms` ve `voice` GSM'i kapsamaz. Hizmet kapsamı (`sms`) aynı hizmetin bir alt kapsamıyla (`sms:send`, `sms:send:gsm`) birlikte istenirse yok sayılır; token alt kapsamla verilir ve yanıttaki `scope` bunu gösterir.\n\nHizmet kapsamlarında (`sms`, `voice`, `fax` …) hizmetin hesapta aktif olması, alt kullanıcı ile girişte alt kullanıcının o hizmete yetkili olması gerekir. Sağlanmazsa token verilmez ve `403 service_not_activated` veya `403 sub_user_not_permitted` döner; `denied_scopes` alanı ilgili kapsamları listeler.\n\n| scope | Kapsam | `/me` yanıtındaki alanlar |\n|---|---|---|\n| `profile` | Temel hesap bilgileri | `username`, `user_code`, `first_name`, `last_name`, `email`, `contract_accepted` |\n| `contact` | İletişim bilgileri | `first_name`, `last_name`, `email` |\n| `email` | E-posta adresi | `email` |\n| `sms` | SMS hizmeti (gönderim veya alım; GSM hariç) | `username`, `user_code`, `contract_accepted`, `sub_user_id`, `sub_user` |\n| `sms:send` | SMS gönderimi | `sms` ile aynı |\n| `sms:receive` | Gelen SMS | `sms` ile aynı |\n| `sms:send:gsm` | GSM SMS gönderimi | `sms` ile aynı |\n| `sms:receive:gsm` | GSM gelen SMS | `sms` ile aynı |\n| `voice` | Ses hizmetleri (giden veya gelen arama; GSM hariç) | `username`, `user_code`, `contract_accepted`, `sub_user_id`, `sub_user` |\n| `voice:outgoing` | Giden sesli arama | `voice` ile aynı |\n| `voice:incoming` | Gelen sesli arama | `voice` ile aynı |\n| `voice:outgoing:gsm` | GSM giden sesli arama | `voice` ile aynı |\n| `voice:incoming:gsm` | GSM gelen sesli arama | `voice` ile aynı |\n| `voice-sms` | Telesekreter hizmeti | `username`, `user_code`, `contract_accepted`, `sub_user_id`, `sub_user` |\n| `voicemail` | Sesli mesaj hizmeti | `username`, `user_code`, `contract_accepted`, `sub_user_id`, `sub_user` |\n| `fax` | Faks hizmeti (gönderim veya alım) | `username`, `user_code`, `contract_accepted`, `sub_user_id`, `sub_user` |\n| `fax:send` | Faks gönderimi | `fax` ile aynı |\n| `fax:receive` | Gelen faks | `fax` ile aynı |\n| `netsantral` | Netsantral hizmeti | `username`, `user_code`, `contract_accepted`, `sub_user_id`, `sub_user` |\n| `netasistan` | Netasistan hizmeti | `username`, `user_code`, `contract_accepted`, `sub_user_id`, `sub_user` |\n| `digital-services` | Dijital hizmetler | `username`, `user_code`, `contract_accepted`, `sub_user_id`, `sub_user` |\n| `financial` | Finansal bilgiler | `username`, `user_code`, `first_name`, `last_name`, `email`, `contract_accepted`, `sub_user_id`, `sub_user` |\n\n`user_id` her kapsamda döner. 2-4 kapsam istendiğinde `/me` yanıtı kapsamlardan **birinin** alanlarını içerir; belirli bir alana ihtiyaç duyan istemci tek kapsam istemelidir. 5 veya daha fazla kapsamda `/me` tablodaki tüm alanları döner.\n\n## İstek ve yanıt\n\n- İstek gövdesi `application/json` veya `application/x-www-form-urlencoded` olabilir.\n- Başarılı yanıtlar doğrudan kaynağı döner (zarf yoktur). Token yanıtı RFC 6749 §5.1 biçimindedir.\n- Token ve hesap bilgisi içeren yanıtlar `Cache-Control: no-store` ve `Pragma: no-cache` başlıklarıyla döner.\n\n## Hatalar\n\nTüm hatalar [RFC 9457 Problem Details](https://www.rfc-editor.org/rfc/rfc9457) biçimindedir (`Content-Type: application/problem+json`):\n\n```json\n{\n  \"type\": \"urn:problem-type:identity:invalid-credentials\",\n  \"title\": \"Kimlik doğrulanamadı\",\n  \"status\": 401,\n  \"detail\": \"Kullanıcı adı veya şifre hatalı.\",\n  \"instance\": \"/auth/v3/token\",\n  \"code\": \"invalid_credentials\",\n  \"request_id\": \"0b6c1d2e-3f4a-4b5c-8d6e-7f8091a2b3c4\"\n}\n```\n\n- `title` ve `detail` son kullanıcıya gösterilebilir. İstemci mantığı `code` alanına göre kurulmalıdır.\n- `request_id` destek taleplerinde iletilmelidir.\n- `401` yanıtları `WWW-Authenticate` başlığı içerir (RFC 6750).\n- **OAuth 2.0 uyumluluğu:** her hata ayrıca `error` ve `error_description` alanlarını içerir ([RFC 6749 §5.2](https://www.rfc-editor.org/rfc/rfc6749#section-5.2), [RFC 6750 §3.1](https://www.rfc-editor.org/rfc/rfc6750#section-3.1)). OAuth istemci kütüphaneleri hatayı bu alanlardan tanır. `error_description` İngilizcedir (RFC gereği ASCII); kullanıcıya gösterilecek Türkçe metin `detail` alanındadır.\n\n| error | code |\n|---|---|\n| `invalid_grant` | `invalid_credentials`, `invalid_refresh_token`, `too_many_failed_attempts` |\n| `invalid_token` | `invalid_token` |\n| `invalid_scope` | `service_not_activated`, `sub_user_not_permitted`; `scope` alanındaki `validation_failed` |\n| `access_denied` | `login_not_permitted`, `api_access_denied`, `ip_not_allowed`, `country_not_allowed`, `account_inactive` |\n| `invalid_request` | `validation_failed`, `invalid_request`, `not_found`, `method_not_allowed`, `payload_too_large` |\n| `temporarily_unavailable` | `rate_limited`, `service_unavailable`, `service_misconfigured` |\n| `server_error` | `internal_error` |\n\n| code | HTTP | Anlamı |\n|---|---|---|\n| `validation_failed` | 422 | Girdi doğrulanamadı; `errors` alanında alan bazlı mesajlar |\n| `invalid_request` | 400 | İstek işlenemedi |\n| `invalid_credentials` | 401 | Kullanıcı adı veya şifre hatalı |\n| `invalid_refresh_token` | 401 | Refresh token geçersiz, süresi dolmuş veya oturum sonlandırılmış |\n| `invalid_token` | 401 | Access token eksik, geçersiz, süresi dolmuş veya oturum sonlandırılmış |\n| `login_not_permitted` | 403 | Bu hesapla giriş yapılamıyor |\n| `api_access_denied` | 403 | Hesabın API erişimi yok |\n| `ip_not_allowed` | 403 | IP adresinden erişim izni yok |\n| `country_not_allowed` | 403 | Yurt dışından erişim izni yok |\n| `account_inactive` | 403 | Hesap aktif değil |\n| `service_not_activated` | 403 | İstenen hizmet hesapta aktif değil (`denied_scopes`) |\n| `sub_user_not_permitted` | 403 | Alt kullanıcının istenen hizmete yetkisi yok (`denied_scopes`) |\n| `https_required` | 403 | İstek düz HTTP ile gönderildi; yalnızca HTTPS kabul edilir |\n| `not_found` | 404 | Adres bulunamadı |\n| `method_not_allowed` | 405 | HTTP metodu desteklenmiyor |\n| `payload_too_large` | 413 | İstek gövdesi çok büyük |\n| `too_many_failed_attempts` | 429 | Çok fazla hatalı giriş denemesi |\n| `rate_limited` | 429 | İstek limiti aşıldı |\n| `internal_error` | 500 | Beklenmeyen hata |\n| `service_misconfigured` | 502 | Sunucu tarafı yapılandırma hatası |\n| `service_unavailable` | 503 | Kimlik doğrulama altyapısına ulaşılamıyor |\n\nİstemcinin isteğinden kaynaklanan tüm hatalar `4xx` döner. `5xx` yalnızca sunucu tarafı / altyapı hatalarında döner; bu durumda istek düzeltilmeden, bir süre sonra tekrar denenebilir.\n\n## Limitler\n\nTüm limitler **dakika** bazlıdır.\n\n| Kapsam | Limit | Anahtar |\n|---|---|---|\n| `POST /auth/v3/token` | 30 istek / dakika | IP |\n| Hatalı giriş (`invalid_credentials`) | 5 deneme / dakika; başarılı giriş sayacı sıfırlar | Kullanıcı adı + IP |\n| `POST /auth/v3/token/refresh` | 60 istek / dakika | IP |\n| `GET /auth/v3/me`, `POST /auth/v3/token/revoke` | 60 istek / dakika | Access token |\n| `GET /auth/v3/me`, `POST /auth/v3/token/revoke` | 300 istek / dakika | IP |\n\nLimitli uçların yanıtları IETF RateLimit başlıklarını içerir:\n\n| Başlık | Örnek | Anlamı |\n|---|---|---|\n| `RateLimit-Limit` | `30` | Penceredeki istek hakkı (en kısıtlayıcı kural) |\n| `RateLimit-Remaining` | `29` | Kalan istek hakkı |\n| `RateLimit-Reset` | `42` | Pencerenin sıfırlanmasına kalan süre (saniye) |\n| `RateLimit-Policy` | `30;w=60` | Kural: 60 saniyede 30 istek |\n\nLimit aşıldığında `429` döner; istemci `Retry-After` başlığındaki süre (saniye) kadar beklemelidir. Limitler yaklaşık uygulanır.\n\n## Girdi sınırları\n\n| Alan | Sınır |\n|---|---|\n| İstek gövdesi | 1 MB |\n| `username`, `password` | 255 karakter |\n| `scope` | 255 karakter |\n| `refresh_token` | UUID (değilse `401 invalid_refresh_token`) |\n| Bearer token | 4096 karakter |",
+    "version": "3.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://ext-api.netgsm.com.tr",
+      "description": "Canlı ortam"
+    },
+    {
+      "url": "https://ext-sandbox.netgsm.com.tr",
+      "description": "Sandbox"
+    }
+  ],
+  "paths": {
+    "/auth/v3/token": {
+      "post": {
+        "tags": [
+          "Token"
+        ],
+        "summary": "Kullanıcı adı ve şifre ile token al",
+        "description": "Kullanıcı adı ve şifre doğrulanır; bilgiler doğruysa istenen kapsamda (`scope`) access ve refresh token döner. `scope` zorunludur; izin verilen değerler ve `/me` yanıtına etkisi için API açıklamasındaki \"Scope\" bölümüne bakın.\n\nİstemcinin IP adresi, ülkesi ve `User-Agent` bilgisi güvenlik kontrolleri (IP izinleri, risk analizi, yurt dışı erişim) için kullanılır.\n\n**Limitler:** IP başına 30 istek / dakika. Aynı kullanıcı adı ve IP için dakikada 5 hatalı denemeden sonra `429 too_many_failed_attempts`; başarılı giriş sayacı sıfırlar.",
+        "operationId": "issueToken",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token üretildi.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/Cache-Control"
+              },
+              "Pragma": {
+                "$ref": "#/components/headers/Pragma"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimit-Limit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimit-Remaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimit-Reset"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimit-Policy"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Token"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Kullanıcı adı veya şifre hatalı.",
+            "headers": {
+              "WWW-Authenticate": {
+                "$ref": "#/components/headers/WWW-Authenticate"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "urn:problem-type:identity:invalid-credentials",
+                  "title": "Kimlik doğrulanamadı",
+                  "status": 401,
+                  "detail": "Kullanıcı adı veya şifre hatalı.",
+                  "instance": "/auth/v3/token",
+                  "code": "invalid_credentials",
+                  "error": "invalid_grant",
+                  "error_description": "Username or password is incorrect.",
+                  "request_id": "0b6c1d2e-3f4a-4b5c-8d6e-7f8091a2b3c4"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "502": {
+            "$ref": "#/components/responses/BadGateway"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": []
+      }
+    },
+    "/auth/v3/token/refresh": {
+      "post": {
+        "tags": [
+          "Token"
+        ],
+        "summary": "Refresh token ile yeni token al",
+        "description": "Refresh token ile yeni token çifti üretilir. İstemci yanıttaki yeni `access_token` ve `refresh_token` değerlerini saklamalıdır. Yenilemeden sonra önceki access token geçersiz olur.\n\nSonlandırılmış veya süresi dolmuş oturumun refresh token'ı `401 invalid_refresh_token` alır; kullanıcı yeniden giriş yapmalıdır.\n\n**Limit:** IP başına 60 istek / dakika.",
+        "operationId": "refreshToken",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshTokenRequest"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token yenilendi.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/Cache-Control"
+              },
+              "Pragma": {
+                "$ref": "#/components/headers/Pragma"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimit-Limit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimit-Remaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimit-Reset"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimit-Policy"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Token"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "Refresh token geçersiz, süresi dolmuş veya oturum sonlandırılmış.",
+            "headers": {
+              "WWW-Authenticate": {
+                "$ref": "#/components/headers/WWW-Authenticate"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "urn:problem-type:identity:invalid-refresh-token",
+                  "title": "Geçersiz refresh token",
+                  "status": 401,
+                  "detail": "Oturum süresi dolmuş veya sonlandırılmış. Lütfen yeniden giriş yapın.",
+                  "instance": "/auth/v3/token/refresh",
+                  "code": "invalid_refresh_token",
+                  "error": "invalid_grant",
+                  "error_description": "The session has expired or been terminated. Please sign in again.",
+                  "request_id": "0b6c1d2e-3f4a-4b5c-8d6e-7f8091a2b3c4"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "502": {
+            "$ref": "#/components/responses/BadGateway"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": []
+      }
+    },
+    "/auth/v3/token/revoke": {
+      "post": {
+        "tags": [
+          "Token"
+        ],
+        "summary": "Mevcut oturumu sonlandır",
+        "description": "Bearer token'ın ait olduğu oturumu sonlandırır: access token ve oturumun refresh token'ı geçersiz olur. İstek gövdesi gerekmez; başarılı yanıtın gövdesi yoktur.\n\n**Limit:** token başına 60, IP başına 300 istek / dakika.",
+        "operationId": "revokeToken",
+        "responses": {
+          "204": {
+            "description": "Oturum sonlandırıldı.",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimit-Limit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimit-Remaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimit-Reset"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimit-Policy"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "502": {
+            "$ref": "#/components/responses/BadGateway"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "oauth2": []
+          }
+        ]
+      }
+    },
+    "/auth/v3/me": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Giriş yapan hesabın bilgileri",
+        "description": "Bearer token sahibi hesabın bilgilerini döner. Dönen alanlar token'ın kapsamına (scope) göre değişir; kapsamda olmayan alan yanıtta yer almaz.\n\nDiğer servisler bir access token'ın hâlâ geçerli (oturumu sonlandırılmamış) olup olmadığını bu uçla doğrulayabilir. Yanıt token ve istemci IP'si başına kısa süre (varsayılan 30 sn) önbellekte tutulur: `/auth/v3/token/revoke` ile kapatılan token hemen geçersiz görünür; refresh sonrası eski access token bu süre boyunca geçerli görünebilir.\n\n**Limit:** token başına 60, IP başına 300 istek / dakika.",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "Hesap bilgileri.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/Cache-Control"
+              },
+              "Pragma": {
+                "$ref": "#/components/headers/Pragma"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimit-Limit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimit-Remaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimit-Reset"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimit-Policy"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "502": {
+            "$ref": "#/components/responses/BadGateway"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "oauth2": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Account": {
+        "description": "Token sahibi hesabın bilgileri. `user_id` dışındaki alanlar token'ın kapsamına (scope) göre döner: kapsamda olmayan alan yanıtta **yer almaz**; `null`, alanın kapsamda olduğunu ancak değerinin boş olduğunu gösterir. Kapsam / alan tablosu için API açıklamasındaki \"Scope\" bölümüne bakın.",
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "user_id": {
+            "description": "Hesap kimliği",
+            "type": "integer",
+            "format": "int64",
+            "example": 100001
+          },
+          "username": {
+            "description": "Kullanıcı adı",
+            "type": "string",
+            "example": "100001",
+            "nullable": true
+          },
+          "user_code": {
+            "description": "Kullanıcı (abone) kodu",
+            "type": "string",
+            "example": "3120000000",
+            "nullable": true
+          },
+          "first_name": {
+            "description": "Ad",
+            "type": "string",
+            "example": "Ad",
+            "nullable": true
+          },
+          "last_name": {
+            "description": "Soyad",
+            "type": "string",
+            "example": "Soyad",
+            "nullable": true
+          },
+          "email": {
+            "description": "E-posta adresi",
+            "type": "string",
+            "format": "email",
+            "example": "ornek@example.com",
+            "nullable": true
+          },
+          "contract_accepted": {
+            "description": "Sözleşme onaylı mı",
+            "type": "boolean",
+            "example": true,
+            "nullable": true
+          },
+          "sub_user_id": {
+            "description": "Alt kullanıcı kimliği; ana hesapta 0",
+            "type": "integer",
+            "format": "int64",
+            "example": 2
+          },
+          "sub_user": {
+            "description": "Alt kullanıcı ile giriş yapıldıysa alt kullanıcı bilgisi; ana hesapta null",
+            "required": [
+              "id",
+              "first_name",
+              "last_name"
+            ],
+            "properties": {
+              "id": {
+                "type": "integer",
+                "format": "int64",
+                "example": 2
+              },
+              "first_name": {
+                "type": "string",
+                "example": "Ad",
+                "nullable": true
+              },
+              "last_name": {
+                "type": "string",
+                "example": "Soyad",
+                "nullable": true
+              }
+            },
+            "type": "object",
+            "nullable": true
+          }
+        },
+        "type": "object"
+      },
+      "Problem": {
+        "description": "RFC 9457 Problem Details. Content-Type: application/problem+json. `title` ve `detail` kullanıcıya gösterilebilir; istemci mantığı `code` alanına göre kurulmalıdır.",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "code",
+          "error",
+          "error_description"
+        ],
+        "properties": {
+          "type": {
+            "description": "Hata tipinin URI tanımlayıcısı",
+            "type": "string",
+            "format": "uri",
+            "example": "urn:problem-type:identity:invalid-credentials"
+          },
+          "title": {
+            "description": "Hata tipinin kısa, sabit özeti",
+            "type": "string",
+            "example": "Kimlik doğrulanamadı"
+          },
+          "status": {
+            "description": "HTTP durum kodu",
+            "type": "integer",
+            "format": "int32",
+            "example": 401,
+            "maximum": 599,
+            "minimum": 400
+          },
+          "detail": {
+            "description": "Kullanıcıya gösterilebilir açıklama",
+            "type": "string",
+            "example": "Kullanıcı adı veya şifre hatalı."
+          },
+          "instance": {
+            "description": "Hatanın oluştuğu istek yolu",
+            "type": "string",
+            "format": "uri-reference",
+            "example": "/auth/v3/token"
+          },
+          "code": {
+            "description": "Makine tarafından okunabilir hata kodu",
+            "type": "string",
+            "example": "invalid_credentials",
+            "enum": [
+              "validation_failed",
+              "invalid_request",
+              "invalid_credentials",
+              "invalid_refresh_token",
+              "invalid_token",
+              "login_not_permitted",
+              "api_access_denied",
+              "ip_not_allowed",
+              "country_not_allowed",
+              "account_inactive",
+              "service_not_activated",
+              "sub_user_not_permitted",
+              "too_many_failed_attempts",
+              "rate_limited",
+              "not_found",
+              "method_not_allowed",
+              "payload_too_large",
+              "internal_error",
+              "service_misconfigured",
+              "service_unavailable"
+            ]
+          },
+          "error": {
+            "description": "OAuth 2.0 hata kodu (RFC 6749 §5.2, RFC 6750 §3.1). OAuth istemci kütüphaneleri hatayı bu alandan tanır; ayrıntılı ayrım için `code` kullanılır.",
+            "type": "string",
+            "example": "invalid_grant",
+            "enum": [
+              "invalid_request",
+              "invalid_grant",
+              "invalid_scope",
+              "invalid_token",
+              "access_denied",
+              "temporarily_unavailable",
+              "server_error"
+            ]
+          },
+          "error_description": {
+            "description": "OAuth 2.0 hata açıklaması (İngilizce, ASCII; RFC 6749 §5.2). Son kullanıcıya gösterilecek Türkçe metin `detail` alanındadır.",
+            "type": "string",
+            "example": "Username or password is incorrect."
+          },
+          "request_id": {
+            "description": "Destek talebinde iletilecek istek kimliği; X-Thread-Id yanıt başlığıyla aynıdır",
+            "type": "string",
+            "example": "0b6c1d2e-3f4a-4b5c-8d6e-7f8091a2b3c4"
+          },
+          "retry_after": {
+            "description": "Yalnızca 429: tekrar denemeden önce beklenecek süre (saniye)",
+            "type": "integer",
+            "format": "int32",
+            "example": 42,
+            "minimum": 1
+          },
+          "denied_scopes": {
+            "description": "Yalnızca service_not_activated ve sub_user_not_permitted: koşulu sağlanmayan scope'lar",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "example": [
+              "fax"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "RefreshTokenRequest": {
+        "required": [
+          "refresh_token"
+        ],
+        "properties": {
+          "refresh_token": {
+            "description": "Token alma veya son yenileme yanıtındaki refresh_token. UUID olmayan değer `401 invalid_refresh_token` döner.",
+            "type": "string",
+            "format": "uuid",
+            "example": "a170696c-8c1f-4eb5-81bd-391e29fbebc4",
+            "maxLength": 512
+          }
+        },
+        "type": "object"
+      },
+      "Token": {
+        "description": "OAuth 2.0 token yanıtı (RFC 6749 §5.1). user_id ve sub_user_id bu servise özgü ek alanlardır.",
+        "required": [
+          "access_token",
+          "token_type",
+          "expires_in",
+          "refresh_token",
+          "scope",
+          "user_id",
+          "sub_user_id"
+        ],
+        "properties": {
+          "access_token": {
+            "description": "JWT access token. Korunan uçlarda Bearer olarak gönderilir.",
+            "type": "string",
+            "example": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhYmMiLCJqdGkiOiI1ZDg3In0.MgCc8YsgZ0P3ZWHt0beLrBEH1u4IIhEUS48lv6e1fFY"
+          },
+          "token_type": {
+            "description": "Token tipi",
+            "type": "string",
+            "example": "Bearer",
+            "enum": [
+              "Bearer"
+            ]
+          },
+          "expires_in": {
+            "description": "Access token geçerlilik süresi (saniye)",
+            "type": "integer",
+            "format": "int32",
+            "example": 86400,
+            "minimum": 0
+          },
+          "refresh_token": {
+            "description": "Token yenilemek için kullanılır",
+            "type": "string",
+            "example": "a170696c-8c1f-4eb5-81bd-391e29fbebc4"
+          },
+          "scope": {
+            "description": "Token kapsamları; boşlukla ayrılmış (bkz. TokenRequest.scope)",
+            "type": "string",
+            "example": "profile",
+            "nullable": true
+          },
+          "user_id": {
+            "description": "Hesap kimliği",
+            "type": "integer",
+            "format": "int64",
+            "example": 100001
+          },
+          "sub_user_id": {
+            "description": "Alt kullanıcı kimliği; ana hesapta 0",
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          }
+        },
+        "type": "object"
+      },
+      "TokenRequest": {
+        "required": [
+          "username",
+          "password",
+          "scope"
+        ],
+        "properties": {
+          "username": {
+            "description": "Kullanıcı adı",
+            "type": "string",
+            "example": "312XXXXXXX",
+            "maxLength": 255
+          },
+          "password": {
+            "description": "Şifre",
+            "type": "string",
+            "format": "password",
+            "example": "S3cr3t!",
+            "maxLength": 255
+          },
+          "scope": {
+            "description": "İstenen kapsamlar (RFC 6749 §3.3): boşlukla ayrılmış bir veya daha fazla değer. İzin verilenler: `profile`, `contact`, `email`, `sms`, `sms:send`, `sms:receive`, `sms:send:gsm`, `sms:receive:gsm`, `voice`, `voice:outgoing`, `voice:incoming`, `voice:outgoing:gsm`, `voice:incoming:gsm`, `voice-sms`, `voicemail`, `fax`, `fax:send`, `fax:receive`, `netsantral`, `netasistan`, `digital-services`, `financial`. Hizmet kapsamı alt kapsamıyla birlikte istenirse yok sayılır.",
+            "type": "string",
+            "pattern": "^(profile|contact|email|sms|sms:send|sms:receive|sms:send:gsm|sms:receive:gsm|voice|voice:outgoing|voice:incoming|voice:outgoing:gsm|voice:incoming:gsm|voice-sms|voicemail|fax|fax:send|fax:receive|netsantral|netasistan|digital-services|financial)( (profile|contact|email|sms|sms:send|sms:receive|sms:send:gsm|sms:receive:gsm|voice|voice:outgoing|voice:incoming|voice:outgoing:gsm|voice:incoming:gsm|voice-sms|voicemail|fax|fax:send|fax:receive|netsantral|netasistan|digital-services|financial))*$",
+            "example": "profile",
+            "maxLength": 255
+          }
+        },
+        "type": "object"
+      },
+      "ValidationProblem": {
+        "description": "Doğrulama hatası (422). Problem alanlarına ek olarak alan bazlı hatalar.",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Problem"
+          },
+          {
+            "required": [
+              "errors"
+            ],
+            "properties": {
+              "errors": {
+                "description": "Alan adı => hata mesajları",
+                "type": "object",
+                "example": {
+                  "username": [
+                    "Kullanıcı adı alanı zorunludur."
+                  ]
+                },
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "İstek işlenemedi.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            },
+            "example": {
+              "type": "urn:problem-type:identity:invalid-request",
+              "title": "Geçersiz istek",
+              "status": 400,
+              "detail": "İstek işlenemedi.",
+              "instance": "/auth/v3/token",
+              "code": "invalid_request",
+              "error": "invalid_request",
+              "error_description": "The request could not be processed.",
+              "request_id": "0b6c1d2e-3f4a-4b5c-8d6e-7f8091a2b3c4"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Access token eksik, geçersiz, süresi dolmuş veya oturumu sonlandırılmış.",
+        "headers": {
+          "WWW-Authenticate": {
+            "$ref": "#/components/headers/WWW-Authenticate"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            },
+            "example": {
+              "type": "urn:problem-type:identity:invalid-token",
+              "title": "Geçersiz access token",
+              "status": 401,
+              "detail": "Oturum bulunamadı veya süresi dolmuş.",
+              "instance": "/auth/v3/me",
+              "code": "invalid_token",
+              "error": "invalid_token",
+              "error_description": "Session not found or expired.",
+              "request_id": "0b6c1d2e-3f4a-4b5c-8d6e-7f8091a2b3c4"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Hesabın bu işlem için izni yok.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            },
+            "examples": {
+              "login_not_permitted": {
+                "summary": "Giriş izni yok",
+                "value": {
+                  "type": "urn:problem-type:identity:login-not-permitted",
+                  "title": "Giriş izni yok",
+                  "status": 403,
+                  "detail": "Bu hesapla giriş yapılamıyor.",
+                  "code": "login_not_permitted",
+                  "error": "access_denied",
+                  "error_description": "This account cannot sign in."
+                }
+              },
+              "api_access_denied": {
+                "summary": "API erişimi kapalı",
+                "value": {
+                  "type": "urn:problem-type:identity:api-access-denied",
+                  "title": "API erişimi kapalı",
+                  "status": 403,
+                  "detail": "Hesabınızın API erişimi bulunmuyor.",
+                  "code": "api_access_denied",
+                  "error": "access_denied",
+                  "error_description": "This account does not have API access."
+                }
+              },
+              "ip_not_allowed": {
+                "summary": "IP izni yok",
+                "value": {
+                  "type": "urn:problem-type:identity:ip-not-allowed",
+                  "title": "IP adresine izin verilmiyor",
+                  "status": 403,
+                  "detail": "Bu IP adresinden erişim izni bulunmuyor.",
+                  "code": "ip_not_allowed",
+                  "error": "access_denied",
+                  "error_description": "Access from this IP address is not permitted."
+                }
+              },
+              "country_not_allowed": {
+                "summary": "Yurt dışı erişim izni yok",
+                "value": {
+                  "type": "urn:problem-type:identity:country-not-allowed",
+                  "title": "Yurt dışı erişim izni yok",
+                  "status": 403,
+                  "detail": "Hesabınızın yurt dışından erişim izni bulunmuyor.",
+                  "code": "country_not_allowed",
+                  "error": "access_denied",
+                  "error_description": "This account is not permitted to sign in from abroad."
+                }
+              },
+              "account_inactive": {
+                "summary": "Hesap aktif değil",
+                "value": {
+                  "type": "urn:problem-type:identity:account-inactive",
+                  "title": "Hesap aktif değil",
+                  "status": 403,
+                  "detail": "Hesabınız aktif değil.",
+                  "code": "account_inactive",
+                  "error": "access_denied",
+                  "error_description": "This account is not active."
+                }
+              },
+              "service_not_activated": {
+                "summary": "Hizmet aktif değil",
+                "value": {
+                  "type": "urn:problem-type:identity:service-not-activated",
+                  "title": "Hizmet aktif değil",
+                  "status": 403,
+                  "detail": "Hesabınızda istenen hizmet aktif değil.",
+                  "code": "service_not_activated",
+                  "error": "invalid_scope",
+                  "error_description": "The requested service is not active on this account.",
+                  "denied_scopes": [
+                    "fax"
+                  ]
+                }
+              },
+              "sub_user_not_permitted": {
+                "summary": "Alt kullanıcı yetkisi yok",
+                "value": {
+                  "type": "urn:problem-type:identity:sub-user-not-permitted",
+                  "title": "Alt kullanıcı yetkisi yok",
+                  "status": 403,
+                  "detail": "Alt kullanıcınızın istenen hizmete yetkisi bulunmuyor.",
+                  "code": "sub_user_not_permitted",
+                  "error": "invalid_scope",
+                  "error_description": "The sub-user is not permitted to use the requested service.",
+                  "denied_scopes": [
+                    "sms"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "ValidationFailed": {
+        "description": "Girdi doğrulanamadı.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ValidationProblem"
+            },
+            "example": {
+              "type": "urn:problem-type:identity:validation-failed",
+              "title": "Doğrulama hatası",
+              "status": 422,
+              "detail": "Girilen bilgiler eksik veya hatalı.",
+              "instance": "/auth/v3/token",
+              "code": "validation_failed",
+              "error": "invalid_request",
+              "error_description": "The given data is missing or invalid.",
+              "errors": {
+                "username": [
+                  "Kullanıcı adı alanı zorunludur."
+                ]
+              }
+            }
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "Limit aşıldı. `Retry-After` kadar beklenmelidir.",
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/Retry-After"
+          },
+          "RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimit-Limit"
+          },
+          "RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimit-Remaining"
+          },
+          "RateLimit-Reset": {
+            "$ref": "#/components/headers/RateLimit-Reset"
+          },
+          "RateLimit-Policy": {
+            "$ref": "#/components/headers/RateLimit-Policy"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            },
+            "examples": {
+              "rate_limited": {
+                "summary": "İstek limiti",
+                "value": {
+                  "type": "urn:problem-type:identity:rate-limited",
+                  "title": "İstek limiti aşıldı",
+                  "status": 429,
+                  "detail": "Çok fazla istek gönderildi. Lütfen daha sonra tekrar deneyin.",
+                  "code": "rate_limited",
+                  "error": "temporarily_unavailable",
+                  "error_description": "Too many requests. Please try again later.",
+                  "retry_after": 42
+                }
+              },
+              "too_many_failed_attempts": {
+                "summary": "Hatalı giriş limiti",
+                "value": {
+                  "type": "urn:problem-type:identity:too-many-failed-attempts",
+                  "title": "Çok fazla hatalı deneme",
+                  "status": 429,
+                  "detail": "Çok fazla hatalı deneme yapıldı. Lütfen daha sonra tekrar deneyin.",
+                  "code": "too_many_failed_attempts",
+                  "error": "invalid_grant",
+                  "error_description": "Too many failed attempts. Please try again later.",
+                  "retry_after": 42
+                }
+              }
+            }
+          }
+        }
+      },
+      "BadGateway": {
+        "description": "Sunucu tarafı yapılandırma hatası.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            },
+            "example": {
+              "type": "urn:problem-type:identity:service-misconfigured",
+              "title": "Servis yapılandırma hatası",
+              "status": 502,
+              "detail": "Kimlik doğrulama servisi şu an isteği işleyemiyor.",
+              "code": "service_misconfigured",
+              "error": "temporarily_unavailable",
+              "error_description": "The authentication service cannot process the request right now."
+            }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "Kimlik doğrulama altyapısına ulaşılamıyor; daha sonra tekrar denenmelidir. Altyapı art arda hata verdiğinde istekler bir süre doğrudan reddedilir; bu durumda `Retry-After` başlığı beklenecek süreyi (saniye) bildirir.",
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/Retry-After"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            },
+            "example": {
+              "type": "urn:problem-type:identity:service-unavailable",
+              "title": "Servis kullanılamıyor",
+              "status": 503,
+              "detail": "Kimlik doğrulama servisine şu an ulaşılamıyor. Lütfen daha sonra tekrar deneyin.",
+              "code": "service_unavailable",
+              "error": "temporarily_unavailable",
+              "error_description": "The authentication service is currently unavailable. Please try again later."
+            }
+          }
+        }
+      }
+    },
+    "headers": {
+      "Cache-Control": {
+        "description": "Yanıt ara katmanlarda saklanmaz",
+        "schema": {
+          "type": "string",
+          "example": "no-store"
+        }
+      },
+      "Pragma": {
+        "description": "HTTP/1.0 önbellek engeli",
+        "schema": {
+          "type": "string",
+          "example": "no-cache"
+        }
+      },
+      "RateLimit-Limit": {
+        "description": "Penceredeki istek hakkı (en kısıtlayıcı kural)",
+        "schema": {
+          "type": "integer",
+          "format": "int32",
+          "example": 30
+        }
+      },
+      "RateLimit-Policy": {
+        "description": "Kural: <limit>;w=<pencere saniye>",
+        "schema": {
+          "type": "string",
+          "example": "30;w=60"
+        }
+      },
+      "RateLimit-Remaining": {
+        "description": "Penceredeki kalan istek hakkı",
+        "schema": {
+          "type": "integer",
+          "format": "int32",
+          "example": 29
+        }
+      },
+      "RateLimit-Reset": {
+        "description": "Pencerenin sıfırlanmasına kalan süre (saniye)",
+        "schema": {
+          "type": "integer",
+          "format": "int32",
+          "example": 42
+        }
+      },
+      "Retry-After": {
+        "description": "Tekrar denemeden önce beklenecek süre (saniye)",
+        "schema": {
+          "type": "integer",
+          "format": "int32",
+          "example": 42
+        }
+      },
+      "WWW-Authenticate": {
+        "description": "Bearer kimlik doğrulama şeması (RFC 6750)",
+        "schema": {
+          "type": "string",
+          "example": "Bearer error=\"invalid_token\""
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "description": "`POST /auth/v3/token` yanıtındaki `access_token` değeri. Başlık: `Authorization: Bearer {access_token}`",
+        "bearerFormat": "JWT",
+        "scheme": "bearer"
+      },
+      "oauth2": {
+        "type": "oauth2",
+        "description": "OAuth 2.0 Resource Owner Password akışı (RFC 6749 §4.3). Token istenirken `scope` zorunludur; boşlukla ayrılmış birden fazla kapsam istenebilir. Yalnızca aşağıdaki kapsamlar kabul edilir.",
+        "flows": {
+          "password": {
+            "tokenUrl": "/auth/v3/token",
+            "refreshUrl": "/auth/v3/token/refresh",
+            "scopes": {
+              "profile": "Temel hesap bilgileri: kullanıcı adı, abone kodu, ad, soyad, e-posta, sözleşme durumu",
+              "contact": "İletişim bilgileri: ad, soyad, e-posta",
+              "email": "E-posta adresi",
+              "sms": "SMS hizmeti (gönderim veya alım; GSM hariç)",
+              "sms:send": "SMS gönderimi",
+              "sms:receive": "Gelen SMS",
+              "sms:send:gsm": "GSM SMS gönderimi",
+              "sms:receive:gsm": "GSM gelen SMS",
+              "voice": "Ses hizmetleri (giden veya gelen arama; GSM hariç)",
+              "voice:outgoing": "Giden sesli arama",
+              "voice:incoming": "Gelen sesli arama",
+              "voice:outgoing:gsm": "GSM giden sesli arama",
+              "voice:incoming:gsm": "GSM gelen sesli arama",
+              "voice-sms": "Telesekreter hizmeti",
+              "voicemail": "Sesli mesaj hizmeti",
+              "fax": "Faks hizmeti (gönderim veya alım)",
+              "fax:send": "Faks gönderimi",
+              "fax:receive": "Gelen faks",
+              "netsantral": "Netsantral hizmeti",
+              "netasistan": "Netasistan hizmeti",
+              "digital-services": "Dijital hizmetler",
+              "financial": "Finansal bilgiler: ödeme tipi, sözleşme tarihi, abone bilgileri"
+            }
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Token",
+      "description": "Token alma, yenileme ve oturum sonlandırma"
+    },
+    {
+      "name": "Account",
+      "description": "Giriş yapmış hesabın bilgileri"
+    }
+  ]
+}

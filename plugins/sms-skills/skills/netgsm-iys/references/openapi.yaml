@@ -1,0 +1,721 @@
+openapi: 3.0.3
+info:
+  title: Netgsm İYS API
+  version: "1.0"
+  description: |
+    Bu API ile İleti Yönetim Sistemi'ne (İYS) izin kaydedebilir, kayıtlı izinleri sorgulayabilir
+    ve izin sonuçlarının bildirileceği webhook adresinizi tanımlayabilirsiniz.
+
+    ## Kimlik doğrulama
+
+    Her isteğe `Authorization: Bearer <token>` başlığını eklemelisiniz. Token'ı Netgsm
+    Authorization API'nin `POST /auth/v3/token` ucundan, kullanıcı adınız ve şifrenizle alırsınız.
+    Hesabınızda İYS hizmetinin aktif olması gerekir.
+
+    ## İstek ve yanıt biçimi
+
+    - Gövdeler JSON'dur: `Content-Type: application/json`.
+    - Tarih ve saatler `YYYY-MM-DD HH:mm:ss` biçimindedir, örneğin `2026-02-20 16:46:00`.
+    - Telefon numaraları `+90XXXXXXXXXX` biçiminde, e-posta adresleri olduğu gibi gönderilir.
+    - `brandCode`, İYS'deki marka kodunuzdur.
+
+    Her yanıt aynı zarfla döner:
+
+    ```json
+    {
+      "success": true,
+      "errorCode": 0,
+      "message": "success",
+      "data": {}
+    }
+    ```
+
+    `success` işlemin başarılı olup olmadığını, `errorCode` sonucu gösterir; başarılı yanıtta
+    `errorCode` `0`'dır.
+
+    Her yanıtta `X-Thread-Id` başlığı döner. Destek ekibine yazarken bu değeri paylaşmanız,
+    isteğinizi hızlıca bulmamızı sağlar. İsteğe kendi `X-Request-Id` değerinizi (8-64 karakter,
+    `A-Z a-z 0-9 . _ -`) eklerseniz `X-Thread-Id` olarak bu değer kullanılır.
+
+    ## Hata kodları
+
+    | errorCode | Hata | HTTP | Açıklama |
+    |---|---|---|---|
+    | 50 | `UNAUTHENTICATED` | 401 | Kimlik doğrulama yapılmadı. |
+    | 51 | `TOKEN_NOT_FOUND` | 401 | Token bulunamadı. |
+    | 52 | `INVALID_TOKEN` | 401 | Geçersiz token. |
+    | 53 | `SESSION_EXPIRED` | 401 | Token'ın süresi dolmuş. |
+    | 60 | `UNAUTHORIZED` | 403 | Yetkisiz erişim. |
+    | 61 | `FORBIDDEN` | 403 | Erişim engellendi. |
+    | 63 | `IYS_MODULE_INACTIVE` | 403 | Hesapta İYS hizmeti aktif değil. |
+    | 70 | `VALIDATION_ERROR` | 422 | İstekteki bir alan kurallara uymuyor; ayrıntı `data.errors` içindedir. |
+    | 80 | `METHOD_NOT_ALLOWED` | 405 | Adres bu metodu desteklemiyor. |
+    | 81 | `NOT_FOUND` | 404 | Kayıt bulunamadı. |
+    | 112 | `DEPENDENCY_ERROR` | 424 | İYS'den geçerli bir yanıt alınamadı. |
+    | 120 | `BAD_REQUEST` | 400 | Hatalı istek. |
+    | 130 | `CONFLICT` | 409 | Kayıt zaten mevcut. |
+    | 141 | `INTEGRATION_ERROR` | 503 | Servis şu anda isteği işleyemiyor; isteği biraz sonra tekrar gönderebilirsiniz. |
+    | 150 | `TOO_MANY_REQUESTS` | 429 | Çok fazla istek gönderildi. |
+    | 110 | `SERVER_ERROR` | 500 | Beklenmeyen bir hata oluştu. |
+servers:
+  - url: https://ext-api.netgsm.com.tr/iys/v1
+    description: Canlı ortam
+
+security:
+  - bearer: []
+
+tags:
+  - name: İzinler
+    description: İYS'ye izin kaydetme ve kayıtlı izinleri sorgulama.
+  - name: Webhook
+    description: İzin sonuçlarının bildirileceği adresi tanımlama.
+
+paths:
+  /consents:
+    get:
+      operationId: searchConsents
+      tags: ["İzinler"]
+      summary: İzin sorgulama
+      description: |
+        Bir ya da birden fazla alıcının İYS'deki izin durumunu sorgular.
+
+        **Tekil sorgu:** `recipient`, `recipientType` ve `type` alanlarını gönderin.
+
+        **Çoklu sorgu:** Kayıtları `data` dizisiyle, en fazla 1000 kayıt olacak şekilde gönderin:
+
+        ```
+        GET /consents?brandCode=123456&data[0][recipient]=%2B905551112233&data[0][recipientType]=BIREYSEL&data[0][type]=MESAJ&data[1][recipient]=ornek@mail.com&data[1][recipientType]=BIREYSEL&data[1][type]=EPOSTA
+        ```
+
+        - `data` içinde tek kayıt varsa tekil sorgu yapılır; yanıt tekil sorguyla aynıdır.
+        - Sonuçlar gönderilen kayıtlarla aynı sırada döner. Çoklu sorguda her kaydın kendi
+          `errorCode` ve `message` alanı vardır: `0` başarılı, `81` kayıt bulunamadı, `120` hatalı
+          istek, `112` İYS'den geçerli yanıt alınamadı. Hatalı kayıtta sorgulanan alanlar korunur.
+        - İsteğin tamamını etkileyen bir hata (örneğin geçersiz `brandCode`) isteği `400` ile
+          sonlandırır.
+        - Kayıtlar adres satırında taşındığı için çok sayıda kayıtta URL uzunluk sınırına dikkat
+          etmelisiniz.
+      parameters:
+        - name: brandCode
+          in: query
+          required: true
+          description: İYS marka kodu.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 2147483647
+            example: 123456
+        - $ref: "#/components/parameters/Path"
+        - name: refId
+          in: query
+          required: false
+          description: İsteğe eklediğiniz referans değeri. Çoklu sorguda `data[i][refId]` gönderilmeyen kayıtlar için kullanılır.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+            example: 40e6215d-b5c6-4896-987c-f30f3678f608
+        - name: recipient
+          in: query
+          required: false
+          description: Telefon numarası (`+90XXXXXXXXXX`) ya da e-posta adresi. `data` gönderilmiyorsa zorunludur.
+          schema:
+            type: string
+            example: "+905554443322"
+        - name: recipientType
+          in: query
+          required: false
+          description: Alıcı tipi. `data` gönderilmiyorsa zorunludur.
+          schema:
+            $ref: "#/components/schemas/RecipientType"
+        - name: type
+          in: query
+          required: false
+          description: İzin tipi. `data` gönderilmiyorsa zorunludur.
+          schema:
+            $ref: "#/components/schemas/ConsentType"
+        - name: data
+          in: query
+          required: false
+          description: Çoklu sorgu kayıtları, en fazla 1000. Her kayıtta `recipient`, `recipientType` ve `type` zorunludur.
+          style: deepObject
+          explode: true
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 1000
+            items:
+              $ref: "#/components/schemas/ConsentQuery"
+      responses:
+        "200":
+          description: Sorgu tamamlandı.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentSearchResponse"
+              examples:
+                single:
+                  summary: Tekil sorgu
+                  value:
+                    success: true
+                    errorCode: 0
+                    message: success
+                    data:
+                      - type: MESAJ
+                        source: HS_MESAJ
+                        recipient: "+905555555555"
+                        status: ONAY
+                        consentDate: "2020-07-09 17:20:00"
+                        recipientType: BIREYSEL
+                        creationDate: null
+                        queryStatus: failure
+                bulk:
+                  summary: Çoklu sorgu
+                  value:
+                    success: true
+                    errorCode: 0
+                    message: success
+                    data:
+                      - type: MESAJ
+                        source: HS_WEB
+                        recipient: "+905551112233"
+                        status: ONAY
+                        consentDate: "2026-01-01 10:00:00"
+                        recipientType: BIREYSEL
+                        creationDate: null
+                        queryStatus: null
+                        retailerAccessCount: null
+                        errorCode: 0
+                        message: null
+                      - type: EPOSTA
+                        source: null
+                        recipient: ornek@mail.com
+                        status: null
+                        consentDate: null
+                        recipientType: BIREYSEL
+                        creationDate: null
+                        queryStatus: null
+                        retailerAccessCount: null
+                        errorCode: 81
+                        message: Resource not found
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "424":
+          $ref: "#/components/responses/DependencyFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+    post:
+      operationId: saveConsents
+      tags: ["İzinler"]
+      summary: İzin kaydetme
+      description: |
+        İzinleri İYS'ye kaydeder. Bir istekte en fazla 500 izin gönderebilirsiniz.
+
+        İYS bazı kayıtları reddederse işlem yine başarılı sayılır: kabul edilen kayıtlar işlenir,
+        reddedilenler yanıttaki `data.erroritem` altında, istekteki sıralarıyla (`index`) döner.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConsentSaveRequest"
+            example:
+              brandCode: 123456
+              path: SMSAPI
+              refId: 40e6215d-b5c6-4896-987c-f30f3678f608
+              permissions:
+                - recipient: "+905554443322"
+                  recipientType: BIREYSEL
+                  type: ARAMA
+                  source: HS_FIZIKSEL_ORTAM
+                  status: ONAY
+                  consentDate: "2026-02-20 16:46:00"
+                  retailerCode: 0
+                  retailerAccess: [0, 1]
+      responses:
+        "200":
+          description: İzinler kaydedildi.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentSaveResponse"
+              examples:
+                success:
+                  summary: Tüm kayıtlar kabul edildi
+                  value:
+                    success: true
+                    errorCode: 0
+                    message: success
+                    data:
+                      uid: ee5c7e61-3940-432a-af30-13b0c9944371
+                partial:
+                  summary: Bazı kayıtlar İYS tarafından reddedildi
+                  value:
+                    success: true
+                    errorCode: 0
+                    message: success
+                    data:
+                      uid: ee5c7e61-3940-432a-af30-13b0c9944371
+                      erroritem:
+                        - index: 1
+                          field: recipient
+                          message: Geçersiz telefon numarası formatı
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "424":
+          $ref: "#/components/responses/DependencyFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /webhooks:
+    post:
+      operationId: saveWebhook
+      tags: ["Webhook"]
+      summary: Webhook kaydetme ve güncelleme
+      description: |
+        İYS'ye yüklediğiniz izinlerin işlenme sonuçlarının ve izin değişikliklerinin bildirileceği
+        adresi tanımlar. Marka için daha önce bir adres tanımlandıysa yenisiyle değiştirilir.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRequest"
+            example:
+              brandCode: 123456
+              path: SMSAPI
+              webhookUrl: https://example.com/webhook
+      responses:
+        "200":
+          description: Webhook adresi kaydedildi.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookResponse"
+              example:
+                success: true
+                errorCode: 0
+                message: success
+                data:
+                  uid: ee5c7e61-3940-432a-af30-13b0c9944371
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "424":
+          $ref: "#/components/responses/DependencyFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Authorization API'den aldığınız access token.
+
+  parameters:
+    Path:
+      name: path
+      in: query
+      required: false
+      description: Gönderilmezse `SMSAPI` kabul edilir.
+      schema:
+        $ref: "#/components/schemas/IysPath"
+
+  schemas:
+    IysPath:
+      type: string
+      enum: [SANTRAL, SMSAPI, WEBPORTAL]
+      example: SMSAPI
+
+    RecipientType:
+      type: string
+      description: "`BIREYSEL` bireysel, `TACIR` tacir alıcı."
+      enum: [BIREYSEL, TACIR]
+      example: BIREYSEL
+
+    ConsentType:
+      type: string
+      description: "`ARAMA` sesli arama, `MESAJ` SMS, `EPOSTA` e-posta izni."
+      enum: [ARAMA, MESAJ, EPOSTA]
+      example: MESAJ
+
+    ConsentStatus:
+      type: string
+      description: "`ONAY` izin verildi, `RET` izin reddedildi."
+      enum: [ONAY, RET]
+      example: ONAY
+
+    ConsentSource:
+      type: string
+      description: İznin alındığı kaynak.
+      enum:
+        - HS_FIZIKSEL_ORTAM
+        - HS_ISLAK_IMZA
+        - HS_WEB
+        - HS_CAGRI_MERKEZI
+        - HS_SOSYAL_MEDYA
+        - HS_EPOSTA
+        - HS_MESAJ
+        - HS_MOBIL
+        - HS_EORTAM
+        - HS_ETKINLIK
+        - HS_2015
+        - HS_ATM
+        - HS_KARAR
+      example: HS_WEB
+
+    ConsentQuery:
+      type: object
+      required: [recipient, recipientType, type]
+      properties:
+        recipient:
+          type: string
+          description: Telefon numarası (`+90XXXXXXXXXX`) ya da e-posta adresi.
+          example: "+905551112233"
+        recipientType:
+          $ref: "#/components/schemas/RecipientType"
+        type:
+          $ref: "#/components/schemas/ConsentType"
+        refId:
+          type: string
+          nullable: true
+          description: Gönderilmezse istekteki `refId` kullanılır.
+
+    Consent:
+      type: object
+      properties:
+        type:
+          type: string
+          nullable: true
+          example: MESAJ
+        source:
+          type: string
+          nullable: true
+          example: HS_MESAJ
+        recipient:
+          type: string
+          example: "+905555555555"
+        status:
+          type: string
+          nullable: true
+          example: ONAY
+        consentDate:
+          type: string
+          nullable: true
+          example: "2020-07-09 17:20:00"
+        recipientType:
+          type: string
+          example: BIREYSEL
+        creationDate:
+          type: string
+          nullable: true
+        queryStatus:
+          type: string
+          nullable: true
+          example: failure
+        retailerAccessCount:
+          type: integer
+          nullable: true
+          description: Yalnızca çoklu sorguda.
+        errorCode:
+          type: integer
+          description: "Yalnızca çoklu sorguda: `0` başarılı, `81` kayıt bulunamadı, `120` hatalı istek, `112` İYS'den geçerli yanıt alınamadı."
+          example: 0
+        message:
+          type: string
+          nullable: true
+          description: Yalnızca çoklu sorguda, kaydın hata mesajı.
+
+    ConsentSearchResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        errorCode:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Consent"
+
+    ConsentRecord:
+      type: object
+      required: [recipient, recipientType, type, source, status, consentDate]
+      properties:
+        recipient:
+          type: string
+          maxLength: 255
+          description: Telefon numarası (`+90XXXXXXXXXX`) ya da e-posta adresi.
+          example: "+905554443322"
+        recipientType:
+          $ref: "#/components/schemas/RecipientType"
+        type:
+          $ref: "#/components/schemas/ConsentType"
+        source:
+          $ref: "#/components/schemas/ConsentSource"
+        status:
+          $ref: "#/components/schemas/ConsentStatus"
+        consentDate:
+          type: string
+          description: İznin alındığı tarih, `YYYY-MM-DD HH:mm:ss`.
+          example: "2026-02-20 16:46:00"
+        retailerCode:
+          type: integer
+          minimum: 0
+          nullable: true
+          example: 0
+        retailerAccess:
+          type: array
+          nullable: true
+          items:
+            type: integer
+            minimum: 0
+          example: [0, 1]
+
+    ConsentSaveRequest:
+      type: object
+      required: [brandCode, permissions]
+      properties:
+        brandCode:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          description: İYS marka kodu.
+          example: 123456
+        path:
+          allOf:
+            - $ref: "#/components/schemas/IysPath"
+          nullable: true
+          description: Gönderilmezse `SMSAPI` kabul edilir.
+        refId:
+          type: string
+          minLength: 1
+          maxLength: 255
+          nullable: true
+          example: 40e6215d-b5c6-4896-987c-f30f3678f608
+        permissions:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/ConsentRecord"
+
+    RejectedConsent:
+      type: object
+      properties:
+        index:
+          type: integer
+          description: Kaydın `permissions` içindeki sırası (0'dan başlar).
+          example: 1
+        field:
+          type: string
+          example: recipient
+        message:
+          type: string
+          example: Geçersiz telefon numarası formatı
+
+    ConsentSaveResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        errorCode:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            uid:
+              type: string
+              example: ee5c7e61-3940-432a-af30-13b0c9944371
+            erroritem:
+              type: array
+              description: İYS'nin reddettiği kayıtlar. Yalnızca reddedilen kayıt varsa bulunur.
+              items:
+                $ref: "#/components/schemas/RejectedConsent"
+
+    WebhookRequest:
+      type: object
+      required: [brandCode, webhookUrl]
+      properties:
+        brandCode:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          description: İYS marka kodu.
+          example: 123456
+        path:
+          allOf:
+            - $ref: "#/components/schemas/IysPath"
+          nullable: true
+          description: Gönderilmezse `SMSAPI` kabul edilir.
+        webhookUrl:
+          type: string
+          format: uri
+          description: Bildirimlerin gönderileceği adres.
+          example: https://example.com/webhook
+
+    WebhookResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        errorCode:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            uid:
+              type: string
+              example: ee5c7e61-3940-432a-af30-13b0c9944371
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        errorCode:
+          type: integer
+          description: Hata kodu (bkz. Hata kodları).
+          example: 120
+        message:
+          type: string
+          example: Bad request
+        data:
+          description: Hata ayrıntıları. Çoğu hatada boş dizidir; doğrulama hatasında `errors` nesnesini taşır.
+          oneOf:
+            - type: array
+              items: {}
+            - type: object
+
+  responses:
+    BadRequest:
+      description: Hatalı istek.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            errorCode: 120
+            message: Bad request
+            data: []
+    Unauthorized:
+      description: Token yok, geçersiz ya da süresi dolmuş.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            expired:
+              summary: Token'ın süresi dolmuş
+              value:
+                success: false
+                errorCode: 53
+                message: Token has expired
+                data: []
+            notFound:
+              summary: Token bulunamadı
+              value:
+                success: false
+                errorCode: 51
+                message: Token not found
+                data: []
+    Forbidden:
+      description: Yetkisiz erişim ya da hesapta İYS hizmeti aktif değil.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            errorCode: 60
+            message: Unauthorized access
+            data: []
+    ValidationFailed:
+      description: İstekteki bir alan kurallara uymuyor.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            errorCode: 70
+            message: Validation failed
+            data:
+              errors:
+                brandCode: The brand code field is required.
+    DependencyFailed:
+      description: İYS'den geçerli bir yanıt alınamadı.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            errorCode: 112
+            message: Api Error
+            data: []
+    TooManyRequests:
+      description: Çok fazla istek gönderildi.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            errorCode: 150
+            message: Too many requests.
+            data: []
+    ServerError:
+      description: Beklenmeyen bir hata oluştu.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            errorCode: 110
+            message: Server Error
+            data: []

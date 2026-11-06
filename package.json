@@ -1,0 +1,24 @@
+{
+  "name": "netgsm-skills",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "build:specs": "node tools/build-specs.mjs",
+    "build": "npm run build:specs && node tools/build-mock.mjs",
+    "zip": "node tools/build-zip.mjs",
+    "sync-specs": "node tools/sync-specs.mjs",
+    "check": "node tools/leak-scan.mjs . && node tools/check-content.mjs",
+    "test": "npm run build && node --experimental-strip-types --test --test-timeout=60000 \"packages/sms-mock/test/**/*.test.mjs\" \"tools/test/**/*.test.mjs\" && node tools/leak-scan.mjs ."
+  },
+  "devDependencies": {
+    "ajv": "^8",
+    "ajv-formats": "^3",
+    "esbuild": "^0.24",
+    "fflate": "^0.8",
+    "yaml": "^2"
+  }
+}
