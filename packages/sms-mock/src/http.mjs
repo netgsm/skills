@@ -3,21 +3,31 @@
 export const SMS_BODY_LIMIT = 500 * 1024 * 1024;
 export const AUTH_BODY_LIMIT = 1024 * 1024;
 
-/** Yol + metot tablosu. Yollar tam eşleşir (parametre yok). */
+/**
+ * Yol + metot tablosu. Yollar tam eşleşir (parametre yok).
+ * `options.body: false`: uç istek gövdesi almaz (spec'te requestBody yok); gövde okunmadan atılır.
+ * `options.authFirst: false`: SMS ucunda token gövdeden önce denetlenmez; işleyici kendi sırasını uygular.
+ */
 export function createRoutes() {
-  const table = new Map(); // path -> Map(method -> handler)
+  const table = new Map(); // path -> Map(method -> { handler, options })
   return {
-    add(method, path, handler) {
+    add(method, path, handler, options = {}) {
       if (!table.has(path)) table.set(path, new Map());
-      table.get(path).set(method.toUpperCase(), handler);
+      table.get(path).set(method.toUpperCase(), { handler, options });
     },
-    /** @returns {{ handler?: Function, allow: string[] }} */
+    /** @returns {{ handler?: Function, options: { body?: boolean, authFirst?: boolean }, allow: string[] }} */
     match(method, path) {
       const byMethod = table.get(path);
-      if (!byMethod) return { allow: [] };
-      return { handler: byMethod.get(method), allow: [...byMethod.keys()] };
+      if (!byMethod) return { options: {}, allow: [] };
+      const hit = byMethod.get(method);
+      return { handler: hit?.handler, options: hit?.options ?? {}, allow: [...byMethod.keys()] };
     },
   };
+}
+
+/** Baştaki UTF-8 BOM'u (U+FEFF) atar: gerçek API BOM ile başlayan JSON gövdeyi kabul eder. */
+export function stripBom(text) {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }
 
 /** Hangi hata zarfı kullanılacak: 'sms', 'auth' ya da 'plain'. */

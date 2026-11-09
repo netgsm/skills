@@ -7897,7 +7897,7 @@ function registerIdentityRoutes(ctx) {
   ctx.routes.add("POST", "/auth/v3/token/revoke", (req) => authed(req, (token) => {
     ctx.sessions.revoke(token);
     return { status: 204 };
-  }));
+  }), { body: false });
 }
 
 // packages/sms-mock/src/generated/specs.mjs
@@ -13247,7 +13247,7 @@ function registerSendFamilyRoutes(ctx) {
       referenceId: null
     });
     return { status: 202, body: { jobId: job.jobId } };
-  });
+  }, { authFirst: false });
   ctx.routes.add("GET", "/sms/v3/templates", (req) => {
     const auth = authenticate(req, ctx);
     if ("status" in auth) return auth;
@@ -13352,17 +13352,21 @@ var AUTH_BODY_LIMIT = 1024 * 1024;
 function createRoutes() {
   const table = /* @__PURE__ */ new Map();
   return {
-    add(method, path, handler) {
+    add(method, path, handler, options = {}) {
       if (!table.has(path)) table.set(path, /* @__PURE__ */ new Map());
-      table.get(path).set(method.toUpperCase(), handler);
+      table.get(path).set(method.toUpperCase(), { handler, options });
     },
-    /** @returns {{ handler?: Function, allow: string[] }} */
+    /** @returns {{ handler?: Function, options: { body?: boolean, authFirst?: boolean }, allow: string[] }} */
     match(method, path) {
       const byMethod = table.get(path);
-      if (!byMethod) return { allow: [] };
-      return { handler: byMethod.get(method), allow: [...byMethod.keys()] };
+      if (!byMethod) return { options: {}, allow: [] };
+      const hit = byMethod.get(method);
+      return { handler: hit?.handler, options: hit?.options ?? {}, allow: [...byMethod.keys()] };
     }
   };
+}
+function stripBom(text) {
+  return text.charCodeAt(0) === 65279 ? text.slice(1) : text;
 }
 function envelopeFor(path) {
   if (path === "/sms/v3" || path.startsWith("/sms/v3/")) return "sms";
@@ -14623,7 +14627,7 @@ function createMockServer(options = {}) {
       observeExchange(meta, out.status, out);
     };
     try {
-      const { handler, allow } = ctx.routes.match(method, path);
+      const { handler, options: options2, allow } = ctx.routes.match(method, path);
       if (!handler && allow.length === 0) return send(frameworkError(env, "not_found", env === "sms" ? "no such endpoint" : "not found"));
       if (!handler) {
         const out = frameworkError(env, "method_not_allowed", "method not allowed");
@@ -14645,7 +14649,14 @@ function createMockServer(options = {}) {
         requestId
       };
       meta.parsed = parsed;
-      if (["POST", "PUT", "PATCH"].includes(method)) {
+      if (["POST", "PUT", "PATCH"].includes(method) && options2.body !== false) {
+        if (env === "sms" && options2.authFirst !== false) {
+          const auth = authenticate(parsed, ctx);
+          if ("status" in auth) {
+            req.resume();
+            return send(auth);
+          }
+        }
         const encoding = String(req.headers["content-encoding"] || "").trim().toLowerCase();
         if (encoding && encoding !== "identity") {
           return send(frameworkError(env, "unsupported", "compressed request bodies are not supported"));
@@ -14662,6 +14673,7 @@ function createMockServer(options = {}) {
         const ctype = String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
         const isJson = ctype === "application/json" || ctype.endsWith("+json");
         const isForm = env === "auth" && ctype === "application/x-www-form-urlencoded";
+        if (env === "sms" && raw.length === 0) return send(frameworkError(env, "invalid_request", UNREADABLE_BODY));
         const control = path.startsWith("/__mock/");
         if (control && !isJson || raw.length > 0 && !isJson && !isForm) {
           return send(frameworkError(env, "unsupported", "content type must be application/json"));
@@ -14671,9 +14683,10 @@ function createMockServer(options = {}) {
           parsed.json = Object.fromEntries(new URLSearchParams(raw.toString("utf8")));
         } else if (isJson && !(control && raw.length === 0)) {
           const unreadable = env === "sms" ? UNREADABLE_BODY : null;
-          if (raw.length === 0) return send(frameworkError(env, "invalid_request", unreadable ?? "request body is empty"));
+          const text = stripBom(raw.toString("utf8"));
+          if (text.length === 0) return send(frameworkError(env, "invalid_request", unreadable ?? "request body is empty"));
           try {
-            parsed.json = JSON.parse(raw.toString("utf8"));
+            parsed.json = JSON.parse(text);
           } catch {
             return send(frameworkError(env, "invalid_request", unreadable ?? "malformed JSON"));
           }

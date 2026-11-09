@@ -229,8 +229,9 @@ export function registerIdentityRoutes(ctx) {
     body: meBody(ctx.accounts.get(login.accountId), login, session.scope),
   })));
 
+  // Spec: "İstek gövdesi gerekmez" (requestBody yok); gövde okunmaz, token yalnızca Bearer başlığından gelir.
   ctx.routes.add('POST', '/auth/v3/token/revoke', req => authed(req, token => {
     ctx.sessions.revoke(token);
     return { status: 204 };
-  }));
+  }), { body: false });
 }
