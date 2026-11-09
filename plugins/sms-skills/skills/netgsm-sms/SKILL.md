@@ -45,7 +45,8 @@ Kod yazarken, incelerken ya da öneride bulunurken bu kurallar hiçbir zaman çi
 1. **Token önbelleğe alınır, her istekte yeniden alınmaz.** `POST /auth/v3/token` IP başına dakikada 30
    istekle sınırlıdır. Token, `expires_in` süresi (canlıda 86400 sn, yani 24 saat) dolmadan
    `POST /auth/v3/token/refresh` ile yenilenir ve yanıttaki yeni `access_token` ile `refresh_token`
-   saklanır. Yenileme, o oturumun eski access token'ını geçersiz kılar. Her süreç (pod, worker) kendi
+   saklanır ve hemen yeni token'a geçilir. Eski access token'ın hemen reddedileceğine de bir süre daha
+   kabul edileceğine de güvenilmez (bkz. `references/auth.md` "Token yenileme"). Her süreç (pod, worker) kendi
    oturumunu tutabilir, ama aynı refresh token birden fazla süreçte koordinasyonsuz kullanılmaz.
    SMS API'den `401 UNAUTHENTICATED` ya da Identity'den `401 invalid_token` alınırsa yeniden giriş
    yapılır (`POST /auth/v3/token`) ve istek bir kez tekrarlanır.
