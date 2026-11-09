@@ -214,6 +214,9 @@ söyler; `operator` sayısaldır, `failReason` alanı yoktur, `referansID` `null
 `GET /report` karşılıkları: [webhooks.md](../endpoints/webhooks.md).
 
 ```csharp
+using System.Security.Cryptography;
+using System.Text;
+
 var statusReason = new Dictionary<int, string> {
     [3] = "INVALID_NUMBER", [4] = "NOT_SENT_TO_OPERATOR", [8] = "OPERATOR_REJECTED", [11] = "OPERATOR_ERROR",
     [12] = "SEND_ERROR", [13] = "DUPLICATE", [14] = "INSUFFICIENT_CREDIT", [15] = "BLACKLISTED", [16] = "IYS_REJECTED",
@@ -226,7 +229,12 @@ var errorReason = new Dictionary<int, string> {
 app.MapPost("/netgsm/report", async (HttpRequest request, JsonObject payload) =>
 {
     // Kayıtta verdiğiniz başlıkla isteğin sizden geldiğini doğrulayın.
-    if (request.Headers["X-Webhook-Token"] != Environment.GetEnvironmentVariable("NETGSM_WEBHOOK_TOKEN")) return Results.Unauthorized();
+    // Token tanımsız ya da boşsa istek reddedilir (fail-closed): aksi hâlde başlıksız istek de kabul edilirdi.
+    var expected = Environment.GetEnvironmentVariable("NETGSM_WEBHOOK_TOKEN");
+    if (string.IsNullOrEmpty(expected)) return Results.StatusCode(500);
+    var got = request.Headers["X-Webhook-Token"].ToString();
+    if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(got), Encoding.UTF8.GetBytes(expected)))
+        return Results.Unauthorized(); // sabit zamanlı karşılaştırma; boş başlık da uyuşmaz
     foreach (var n in payload["numbers"]?.AsArray() ?? new JsonArray())
     {
         var status = n!["status"]!.GetValue<int>();

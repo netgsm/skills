@@ -197,6 +197,9 @@ sayısaldır, `failReason` alanı yoktur, `referansID` `null` olabilir. Kod tabl
 karşılıkları: [webhooks.md](../endpoints/webhooks.md).
 
 ```python
+import hmac
+import os
+
 from flask import Flask, abort, request
 
 app = Flask(__name__)
@@ -211,7 +214,12 @@ ERROR_REASON = {111: "TIMEOUT", 112: "SMS_DISABLED_ON_DEVICE", 113: "DEVICE_NOT_
 @app.post("/netgsm/report")
 def netgsm_report():
     # Kayıtta verdiğiniz başlıkla isteğin sizden geldiğini doğrulayın.
-    if request.headers.get("X-Webhook-Token") != os.environ["NETGSM_WEBHOOK_TOKEN"]:
+    # Token tanımsız ya da boşsa istek reddedilir (fail-closed): aksi hâlde başlıksız istek de kabul edilirdi.
+    expected = os.environ.get("NETGSM_WEBHOOK_TOKEN", "")
+    if not expected:
+        abort(500)
+    got = request.headers.get("X-Webhook-Token", "")
+    if not hmac.compare_digest(got.encode(), expected.encode()):
         abort(401)
     for n in (request.get_json(silent=True) or {}).get("numbers", []):
         if n["status"] == 1:

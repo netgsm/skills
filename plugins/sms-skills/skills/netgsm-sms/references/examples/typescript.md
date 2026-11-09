@@ -1,6 +1,6 @@
 # TypeScript / Node.js örneği
 
-Referans istemci: [netgsm-client.ts](netgsm-client.ts). Bağımlılığı yoktur, Node ≥ 18'in global
+Referans istemci: [netgsm-client.ts](netgsm-client.ts). Bağımlılığı yoktur, Node ≥ 20'nin global
 `fetch`'ini kullanır. Dosyayı projenize kopyalayın. Bu reponun testleri onu gerçek mock'a karşı çalıştırır
 (token paylaşımı, 401, 429, uç noktaya göre 5xx, `rejectedItems`, bakiye, rapor webhook kodları).
 
@@ -159,11 +159,19 @@ yoktur; `referansID` referans verilmediyse `null`'dır. Bekleyen sonuçlar gelme
 `GET /report`'taki adlara çevirir ([webhooks.md](../endpoints/webhooks.md)).
 
 ```ts
+import { timingSafeEqual } from 'node:crypto';
 import { webhookToReport, type ReportWebhookPayload } from './netgsm-client';
 
 // Kayıtta verdiğiniz başlıkla (ör. 'X-Webhook-Token: <gizli>') isteğin sizden geldiğini doğrulayın.
+// Token tanımsız ya da boşsa uygulama başlamaz (fail-closed): aksi hâlde başlıksız istek de kabul edilirdi.
+const expectedToken = process.env.NETGSM_WEBHOOK_TOKEN;
+if (!expectedToken) throw new Error('NETGSM_WEBHOOK_TOKEN tanımlı olmalı');
+const tokenOk = (got?: string): boolean => {
+  const a = Buffer.from(got ?? ''), b = Buffer.from(expectedToken);
+  return a.length === b.length && timingSafeEqual(a, b); // sabit zamanlı karşılaştırma
+};
 app.post('/netgsm/report', express.json(), async (req, res) => { // Express uygulamanızda (aşağıya bakın)
-  if (req.get('X-Webhook-Token') !== process.env.NETGSM_WEBHOOK_TOKEN) return res.sendStatus(401);
+  if (!tokenOk(req.get('X-Webhook-Token'))) return res.sendStatus(401);
   const { numbers } = req.body as ReportWebhookPayload;
   for (const n of numbers ?? []) {
     const r = webhookToReport(n); // { status: 'DELIVERED' | 'NOT_DELIVERED', failReason, operator }
