@@ -1,0 +1,43 @@
+name: Release
+
+# Builds the claude.ai skill zips and attaches them to the published GitHub Release, so that
+# https://github.com/netgsm/skills/releases/latest/download/<skill>.zip always serves the latest version.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  zips:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Verify release tag matches the plugin version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION=$(node -p "require('./plugins/sms-skills/.claude-plugin/plugin.json').version")
+          if [ "$RELEASE_TAG" != "v$VERSION" ]; then
+            echo "Release tag '$RELEASE_TAG' does not match plugin version 'v$VERSION'" >&2
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm test
+      - run: npm run zip
+      - name: Attach the zips to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/*.zip --clobber --repo "$GITHUB_REPOSITORY"
