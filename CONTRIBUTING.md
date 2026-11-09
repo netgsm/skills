@@ -106,7 +106,7 @@ fixed mtime). The release workflow attaches them to each published GitHub Releas
 The plugin version is in `plugins/sms-skills/.claude-plugin/plugin.json`. Bump it when content or
 behaviour changes, and keep the manifest descriptions in line with the list of skills.
 
-To release, publish a GitHub Release whose tag is `v` plus the plugin version (for example `v3.2.0`).
+To release, publish a GitHub Release whose tag is `v` plus the plugin version (for example `v1.0.0`).
 `.github/workflows/release.yml` checks the tag, runs the tests, builds the zips and attaches them to the
 release. The README links to `releases/latest/download/<skill>.zip`, so the newest release is what
 claude.ai users download.
