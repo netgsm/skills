@@ -199,3 +199,34 @@ test('refresh beklenirken başka bir istek 401 alırsa çökmez, iki istek de ye
   assert.equal(b.uid, 'Bearer acc-2');
   assert.deepEqual(calls.filter((p) => p.startsWith('/auth')), ['/auth/v3/token', '/auth/v3/token/refresh', '/auth/v3/token']);
 });
+
+test('başarısız refresh sonrası eski token 30 sn kullanılır: 10 istekte tek refresh, süre dolunca yeniden denenir', async () => {
+  let t = 0;
+  let refreshOk = false;
+  const calls = [];
+  const fakeFetch = async (input, init = {}) => {
+    const path = new URL(String(input)).pathname;
+    calls.push(path);
+    if (path === '/auth/v3/token') return Response.json({ ...TOKEN, access_token: 'acc-1', expires_in: 3600 });
+    if (path === '/auth/v3/token/refresh') {
+      return refreshOk ? Response.json({ ...TOKEN, access_token: 'acc-2', expires_in: 3600 }) : Response.json({}, { status: 503 });
+    }
+    return Response.json(ok({ uid: init.headers.Authorization }));
+  };
+  const client = new IysClient({
+    baseUrl: BASE, username: 'u', password: 'p', brandCode: 123456, fetch: fakeFetch, now: () => t, sleep: async () => {},
+  });
+  const refreshes = () => calls.filter((p) => p === '/auth/v3/token/refresh').length;
+  assert.equal((await client.saveWebhook('https://example.com/h')).uid, 'Bearer acc-1');
+  t = 3600_000 - 120_000; // yenileme payının (son 6 dk) içinde, token hâlâ geçerli
+  for (let i = 0; i < 10; i++) assert.equal((await client.saveWebhook('https://example.com/h')).uid, 'Bearer acc-1');
+  assert.equal(refreshes(), 1, 'bekleme süresinde yeniden refresh yok');
+  t += 29_000;
+  await client.saveWebhook('https://example.com/h');
+  assert.equal(refreshes(), 1);
+  t += 2_000; // 30 sn doldu
+  refreshOk = true;
+  assert.equal((await client.saveWebhook('https://example.com/h')).uid, 'Bearer acc-2');
+  assert.equal(refreshes(), 2);
+  assert.equal(calls.filter((p) => p === '/auth/v3/token').length, 1, 'yeniden giriş yok');
+});

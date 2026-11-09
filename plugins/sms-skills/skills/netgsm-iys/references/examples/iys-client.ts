@@ -11,6 +11,7 @@
  * Uyguladığı kurallar (bkz. ../getting-started.md, ../errors.md, ../consents.md):
  * - Token `POST /auth/v3/token` ile `scope: "sms"` alınır ve önbelleğe konur; süresinin son
  *   min(5 dk, ömrün %10'u) kısmında refresh edilir. Eş zamanlı çağrılar tek token isteğini paylaşır.
+ *   Başarısız refresh'ten sonra eski token geçerliyse 30 sn onunla devam edilir (bu sürede refresh denenmez).
  * - İYS `401` (errorCode 50–53) → token atılır, yeniden giriş yapılır, istek bir kez tekrarlanır.
  * - `429` (150) ve `503` (141) → 1, 2, 4 sn arayla en fazla 3 tekrar (yanıtta `Retry-After` varsa o).
  * - `424` (112), `500` (110) ve diğer 5xx: `GET /consents` ve `POST /webhooks`'ta tekrar denenir;
@@ -180,9 +181,12 @@ async function readJson(res: Response): Promise<any> {
 
 type Tokens = { access: string; refresh: string; expiresAt: number; marginMs: number };
 
+const REFRESH_BACKOFF_MS = 30_000;
+
 class TokenManager {
   private tokens?: Tokens;
   private inflight?: Promise<string>;
+  private retryAfterMs = 0; // başarısız yenilemeden sonra kısa bekleme
 
   private readonly o: { baseUrl: string; username: string; password: string; fetch: typeof fetch; now: () => number };
 
@@ -192,7 +196,9 @@ class TokenManager {
 
   async get(): Promise<string> {
     const t = this.tokens;
-    if (t && this.o.now() < t.expiresAt - t.marginMs) return t.access;
+    const now = this.o.now();
+    // Yenileme payına girilmediyse ya da başarısız bir yenilemeden sonraki bekleme sürüyorsa eski token kullanılır.
+    if (t && (now < t.expiresAt - t.marginMs || now < this.retryAfterMs) && now < t.expiresAt) return t.access;
     this.inflight ??= this.renew().finally(() => { this.inflight = undefined; });
     return this.inflight;
   }
@@ -207,9 +213,12 @@ class TokenManager {
     if (old) {
       const r = await this.post('/auth/v3/token/refresh', { refresh_token: old.refresh });
       if (r.ok) return this.store(await r.json());
-      // Geçici refresh hatasında eski token hâlâ geçerliyse onunla devam edilir; ancak refresh
-      // beklenirken invalidate() token'ı silmişse (this.tokens !== old) yeniden giriş yapılır.
-      if (r.status !== 401 && this.tokens === old && this.o.now() < old.expiresAt) return old.access;
+      // Geçici refresh hatasında eski token hâlâ geçerliyse onunla devam edilir ve 30 sn yeniden refresh
+      // denenmez; ancak refresh beklenirken invalidate() token'ı silmişse (this.tokens !== old) yeniden giriş yapılır.
+      if (r.status !== 401 && this.tokens === old && this.o.now() < old.expiresAt) {
+        this.retryAfterMs = this.o.now() + REFRESH_BACKOFF_MS;
+        return old.access;
+      }
       this.tokens = undefined;
     }
     // İYS için de scope "sms" (Netgsm kuralı; sözleşme scope belirtmez).
@@ -231,6 +240,7 @@ class TokenManager {
       access: t.access_token, refresh: t.refresh_token,
       expiresAt: this.o.now() + lifeMs, marginMs: Math.min(5 * 60_000, lifeMs / 10),
     };
+    this.retryAfterMs = 0;
     return t.access_token;
   }
 
@@ -327,7 +337,7 @@ export class IysClient {
     return { uid: json.data?.uid, requestId };
   }
 
-  private async request(method: 'GET' | 'POST', path: string, body?: unknown, requestId = globalThis.crypto.randomUUID()): Promise<{ json: any; requestId: string }> {
+  private async request(method: 'GET' | 'POST', path: string, body?: unknown, requestId: string = globalThis.crypto.randomUUID()): Promise<{ json: any; requestId: string }> {
     const operation = `${method} /iys/v1${path.split('?')[0]}`;
     // POST /consents dışındaki istekler tekrar edilebilir: okuma ya da tek adresli ayar (yerine geçer).
     const repeatable = !(method === 'POST' && path === '/consents');

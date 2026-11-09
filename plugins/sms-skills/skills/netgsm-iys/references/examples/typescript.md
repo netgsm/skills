@@ -8,7 +8,7 @@ Referans istemci: [iys-client.ts](iys-client.ts). Bağımlılığı yoktur, Node
 
 | Durum | Davranış |
 |---|---|
-| Token | `POST /auth/v3/token` ile `scope: "sms"`. Bellekte tutulur; süresinin son min(5 dk, ömrün %10'u) kısmında `POST /auth/v3/token/refresh` ile yenilenir. Aynı anda gelen çağrılar tek token isteğini bekler. |
+| Token | `POST /auth/v3/token` ile `scope: "sms"`. Bellekte tutulur; süresinin son min(5 dk, ömrün %10'u) kısmında `POST /auth/v3/token/refresh` ile yenilenir. Aynı anda gelen çağrılar tek token isteğini bekler. Başarısız refresh'te (`401` dışında) eski token geçerliyse 30 sn onunla devam edilir; bu sürede refresh yeniden denenmez. |
 | `401` (50–53) | O istekte kullanılan token atılır, yeniden giriş yapılır, istek **bir kez** tekrarlanır. |
 | `429` (150), `503` (141) | 1, 2, 4 sn arayla en fazla 3 tekrar; yanıtta `Retry-After` varsa ona uyulur (en fazla `maxWaitSec`, varsayılan 60). |
 | `424` (112), `500` (110), diğer 5xx, `GET /consents` ve `POST /webhooks` | 429 / 503 gibi tekrar. |
