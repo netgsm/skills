@@ -76,6 +76,7 @@ Her uç noktada görülebilecek genel durumlar:
 | 406 | — | `Accept` başlığı JSON'u kabul etmiyor. Yanıtın gövdesi yoktur. |
 | 413 | `INVALID_REQUEST` | Gövde 500 MB'ı aşıyor. |
 | 415 | `INVALID_REQUEST` | Gövde JSON değil ya da sıkıştırılmış (`Content-Encoding` yalnızca `identity` olabilir). |
+| 502, 503 | — | Ağ geçidi (CDN) katmanı JSON olmayan (`text/plain` ya da HTML) bir gövdeyle `502`/`503` dönebilir; sandbox'ta daha sık görülür. 5xx gövdesinin JSON olduğunu varsaymayın; geçici sayıp aşağıdaki kurallarla tekrar edin (gönderim uçlarında [belirsiz sonuç kuralları](#503-ve-504-sonrası-kontrol)). |
 | 503 | `SERVICE_UNAVAILABLE` | Servis isteği şu an kabul edemiyor. Gönderim uçlarındaki anlamı uç noktaya göre değişir (yukarıdaki tablo). |
 
 ## SMS API kodları

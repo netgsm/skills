@@ -147,6 +147,7 @@ deneyin.
 | İstek sınırları | Uygulanmaz; `429` dönmez. |
 | Webhook'lar | Yok (`404`). |
 | `503 SERVICE_UNAVAILABLE` | Sandbox'ta token doğrulamasına o an ulaşılamadığını gösterir; yeniden deneyin. |
+| `502` / `503`, JSON olmayan gövde | Sandbox (nadiren ağ geçidi de) `502` ya da `503` ile JSON olmayan bir gövde (`text/plain` ya da HTML) dönebilir; bu yanıtlar CDN/ağ geçidi katmanından gelir. İstemci 5xx gövdesinin JSON problem gövdesi olduğunu varsaymamalı (`Content-Type`'a bakın, ayrıştırma hatasını yakalayın), durum koduna göre geçici sayıp mevcut kurallarla tekrar denemelidir. Gönderim uçlarında belirsiz sonuç kuralları geçerlidir ([errors.md](errors.md#503-ve-504-sonrası-kontrol)). |
 | Yanıt süresi | Her istekte token doğrulandığı için yanıtlar canlıdan biraz yavaş olabilir. |
 
 **Bilinen farklar.** Sandbox'ı denerken şu yanıtların sözleşmeden ya da sandbox'ın kendi
