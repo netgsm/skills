@@ -348,8 +348,11 @@ ve nedeni `errorCode`'da (yalnızca `status` `2` iken anlamlı), diğer kodlar n
 ```php
 <?php
 // Kayıtta verdiğiniz başlıkla isteğin sizden geldiğini doğrulayın.
-if (!hash_equals((string) getenv('NETGSM_WEBHOOK_TOKEN'), $_SERVER['HTTP_X_WEBHOOK_TOKEN'] ?? '')) {
-    http_response_code(401);
+// Token tanımsız ya da boşsa istek reddedilir (fail-closed): aksi hâlde başlıksız istek de kabul edilirdi.
+$expected = (string) getenv('NETGSM_WEBHOOK_TOKEN');
+$got = $_SERVER['HTTP_X_WEBHOOK_TOKEN'] ?? '';
+if ($expected === '' || $got === '' || !hash_equals($expected, $got)) {
+    http_response_code($expected === '' ? 500 : 401);
     exit;
 }
 const STATUS_REASON = [3 => 'INVALID_NUMBER', 4 => 'NOT_SENT_TO_OPERATOR', 8 => 'OPERATOR_REJECTED', 11 => 'OPERATOR_ERROR',

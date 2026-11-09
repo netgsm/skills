@@ -1,6 +1,6 @@
 {
   "name": "sms-skills",
-  "version": "3.1.2",
+  "version": "3.2.0",
   "description": "Netgsm SMS API v3 and İYS API v1 skills in the open Agent Skills format: authentication, sending, reports, webhooks, balance, consent management, error handling and a local SMS API mock.",
   "author": {
     "name": "Netgsm"

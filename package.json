@@ -19,6 +19,7 @@
     "ajv-formats": "^3",
     "esbuild": "^0.24",
     "fflate": "^0.8",
+    "typescript": "^5",
     "yaml": "^2"
   }
 }

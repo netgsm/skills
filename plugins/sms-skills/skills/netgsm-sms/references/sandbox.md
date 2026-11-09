@@ -147,6 +147,7 @@ deneyin.
 | İstek sınırları | Uygulanmaz; `429` dönmez. |
 | Webhook'lar | Yok (`404`). |
 | `503 SERVICE_UNAVAILABLE` | Sandbox'ta token doğrulamasına o an ulaşılamadığını gösterir; yeniden deneyin. |
+| `502` / `503`, JSON olmayan gövde | Sandbox (nadiren ağ geçidi de) `502` ya da `503` ile JSON olmayan bir gövde (`text/plain` ya da HTML) dönebilir; bu yanıtlar CDN/ağ geçidi katmanından gelir. İstemci 5xx gövdesinin JSON problem gövdesi olduğunu varsaymamalı (`Content-Type`'a bakın, ayrıştırma hatasını yakalayın), durum koduna göre geçici sayıp mevcut kurallarla tekrar denemelidir. Gönderim uçlarında belirsiz sonuç kuralları geçerlidir ([errors.md](errors.md#503-ve-504-sonrası-kontrol)). |
 | Yanıt süresi | Her istekte token doğrulandığı için yanıtlar canlıdan biraz yavaş olabilir. |
 
 **Bilinen farklar.** Sandbox'ı denerken şu yanıtların sözleşmeden ya da sandbox'ın kendi
@@ -245,8 +246,12 @@ Hata kodlarının anlamı ve yapılacaklar: [errors.md](errors.md). Uç noktalar
 | Hatalı giriş kilidi | Hesap bazlı kilit ve kullanıcı adı + IP başına dakikada 5 hatalı deneme sınırı | Hesap bazlı kilit yok; kullanıcı adı + IP başına dakikada 5 hatalı deneme sınırı aynen çalışır (`429 too_many_failed_attempts`) |
 
 Diğer her şey (doğrulama kuralları, scope eşleme, hata gövdeleri, limitler, RateLimit başlıkları,
-token ömrü) canlıyla aynıdır. `/me` yanıtı canlıdaki gibi kısa süre önbellekte tutulur: refresh'ten sonra
-eski access token birkaç saniye `/me`'de geçerli görünebilir (bkz. [auth.md](auth.md#hesap-bilgisi-me)).
+token ömrü) canlıyla aynıdır. `/me` yanıtı canlıdaki gibi kısa süre (varsayılan 30 sn) önbellekte
+tutulur: refresh'ten sonra eski access token bu süre boyunca `/me`'de geçerli görünebilir
+(bkz. [auth.md](auth.md#hesap-bilgisi-me)). SMS API'de de yenilemeden hemen önce kullanılmış eski token kısa
+bir süre (gözlemlerde yaklaşık bir dakikadan kısa) kabul edilebilir; hiç kullanılmamış eski token hemen
+`401` alır. İkisine de güvenmeyin: yenilemeden sonra hemen yeni token'a geçin
+(bkz. [auth.md](auth.md#token-yenileme)).
 
 ## Sık sorulanlar
 

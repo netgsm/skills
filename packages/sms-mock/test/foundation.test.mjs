@@ -5,6 +5,14 @@ import http from 'node:http';
 import { createMockServer } from '../src/server.mjs';
 
 async function start() { const s = createMockServer({ port: 0, log: () => {} }); return { s, base: await s.listen() }; }
+// SMS API gövdeyi kimlik doğrulamadan sonra okur: gövde testleri geçerli bir token taşır.
+async function bearer(base) {
+  const r = await fetch(`${base}/auth/v3/token`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: '8500000000', password: 'password001', scope: 'sms' }),
+  });
+  return `Bearer ${(await r.json()).access_token}`;
+}
 
 test('bilinmeyen /sms/v3 yolu 404 NOT_FOUND ApiError döner', async () => {
   const { s, base } = await start();
@@ -22,6 +30,7 @@ test('bilinmeyen /sms/v3 yolu 404 NOT_FOUND ApiError döner', async () => {
 test('bozuk gövdeler çökertmez', async () => {
   const { s, base } = await start();
   s.ctx.routes.add('POST', '/sms/v3/echo', req => ({ status: 200, body: req.json }));
+  const authorization = await bearer(base);
   const cases = [
     [{ 'content-type': 'application/json' }, '{bozuk', 400],
     [{ 'content-type': 'text/plain' }, 'merhaba', 415],
@@ -31,11 +40,11 @@ test('bozuk gövdeler çökertmez', async () => {
     [{ 'content-type': 'application/json' }, 'null', 400],
   ];
   for (const [headers, body, status] of cases) {
-    const r = await fetch(`${base}/sms/v3/echo`, { method: 'POST', headers, body });
+    const r = await fetch(`${base}/sms/v3/echo`, { method: 'POST', headers: { ...headers, authorization }, body });
     assert.equal(r.status, status, JSON.stringify(headers) + body);
     assert.equal((await r.json()).code, 'INVALID_REQUEST');
   }
-  const ok = await fetch(`${base}/sms/v3/echo`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"a":1}' });
+  const ok = await fetch(`${base}/sms/v3/echo`, { method: 'POST', headers: { 'content-type': 'application/json', authorization }, body: '{"a":1}' });
   assert.deepEqual(await ok.json(), { a: 1 });
   await s.close();
 });
@@ -143,9 +152,9 @@ test('bozuk istek hedefi 400 döner ve sunucu çalışmaya devam eder', async ()
   await s.close();
 });
 
-function chunkedPost(base, path, chunks) {
+function chunkedPost(base, path, chunks, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.request(base + path, { method: 'POST', headers: { 'content-type': 'application/json' } }, res => {
+    const req = http.request(base + path, { method: 'POST', headers: { 'content-type': 'application/json', ...extraHeaders } }, res => {
       let body = '';
       res.on('data', d => { body += d; });
       res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(body), headers: res.headers }));
@@ -162,7 +171,9 @@ test('Content-Length olmadan akışla gelen gövde sınırı aşarsa 413 (sms ve
   s.ctx.routes.add('POST', '/sms/v3/echo', req => ({ status: 200, body: req.json }));
   s.ctx.routes.add('POST', '/auth/v3/echo', req => ({ status: 200, body: req.json }));
   const chunks = ['{"a":"', 'x'.repeat(60), 'y'.repeat(60), '"}'];
-  const sms = await chunkedPost(base, '/sms/v3/echo', chunks);
+  // auth sınırı (50 bayt) giriş gövdesinden küçük: token doğrudan oturum deposundan alınır.
+  const authorization = `Bearer ${s.ctx.sessions.open(s.ctx.accounts.login('8500000000', 'password001'), 'sms').accessToken}`;
+  const sms = await chunkedPost(base, '/sms/v3/echo', chunks, { authorization });
   assert.equal(sms.status, 413);
   assert.equal(sms.body.code, 'INVALID_REQUEST');
   assert.match(sms.body.requestId, /^[0-9a-f]{32}$/);
@@ -170,7 +181,7 @@ test('Content-Length olmadan akışla gelen gövde sınırı aşarsa 413 (sms ve
   assert.equal(auth.status, 413);
   assert.equal(auth.body.code, 'payload_too_large');
   assert.equal(auth.headers['content-type'], 'application/problem+json');
-  const ok = await chunkedPost(base, '/sms/v3/echo', ['{"a"', ':1}']);
+  const ok = await chunkedPost(base, '/sms/v3/echo', ['{"a"', ':1}'], { authorization });
   assert.deepEqual(ok.body, { a: 1 });
   await s.close();
 });

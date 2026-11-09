@@ -11,7 +11,8 @@ are written in Turkish for developers in Türkiye; keep them in Turkish. Reposit
 
 - Node.js 22.6 or later (the tests run the TypeScript examples directly with
   `--experimental-strip-types`).
-- Development dependencies via `npm install` (`yaml`, `ajv`, `esbuild`, `fflate`).
+- Development dependencies via `npm install` (`yaml`, `ajv`, `esbuild`, `fflate`, `typescript`).
+  `typescript` is used only by the tests, which type-check the example clients with `tsc --strict`.
 
 ## Commands
 

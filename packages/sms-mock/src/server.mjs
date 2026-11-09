@@ -21,7 +21,7 @@ import { createJobStore } from './jobs.mjs';
 import { createSessionStore } from './identity/sessions.mjs';
 import { createAccountStore, SEED_ACCOUNTS } from './accounts.mjs';
 import {
-  createRoutes, envelopeFor, acceptsJson, istanbulTimestamp, readBody, BodyTooLarge,
+  createRoutes, envelopeFor, acceptsJson, istanbulTimestamp, readBody, BodyTooLarge, stripBom,
   SMS_BODY_LIMIT, AUTH_BODY_LIMIT,
 } from './http.mjs';
 
@@ -228,7 +228,7 @@ export function createMockServer(options = {}) {
     const meta = { method, path, requestId, parsed: null };
     const send = out => { write(res, env, path, requestId, out); observeExchange(meta, out.status, out); };
     try {
-      const { handler, allow } = ctx.routes.match(method, path);
+      const { handler, options, allow } = ctx.routes.match(method, path);
       if (!handler && allow.length === 0) return send(frameworkError(env, 'not_found', env === 'sms' ? 'no such endpoint' : 'not found'));
       if (!handler) {
         const out = frameworkError(env, 'method_not_allowed', 'method not allowed');
@@ -247,7 +247,15 @@ export function createMockServer(options = {}) {
 
       meta.parsed = parsed;
 
-      if (['POST', 'PUT', 'PATCH'].includes(method)) {
+      if (['POST', 'PUT', 'PATCH'].includes(method) && options.body !== false) {
+        // SMS API'de her uç Bearer ister (spec: global security) ve gerçek API önce kimliği doğrular:
+        // token yoksa ya da geçersizse gövde okunmadan, ayrıştırılmadan ve doğrulanmadan 401 döner
+        // (bozuk JSON, içerik türü, sıkıştırma ve boyut hataları dahil). Gövdesiz metotlarda işleyici
+        // zaten ilk iş olarak kimliği doğrular. `authFirst: false` olan uç (/send/otp) kendi sırasını uygular.
+        if (env === 'sms' && options.authFirst !== false) {
+          const auth = authenticate(parsed, ctx);
+          if ('status' in auth) { req.resume(); return send(auth); }
+        }
         const encoding = String(req.headers['content-encoding'] || '').trim().toLowerCase();
         if (encoding && encoding !== 'identity') {
           return send(frameworkError(env, 'unsupported', 'compressed request bodies are not supported'));
@@ -264,6 +272,9 @@ export function createMockServer(options = {}) {
         const ctype = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
         const isJson = ctype === 'application/json' || ctype.endsWith('+json');
         const isForm = env === 'auth' && ctype === 'application/x-www-form-urlencoded';
+        // SMS API'de gövde alan her uçta gövde zorunludur (spec: requestBody.required): Content-Type
+        // olmasa da boş gövde, boş JSON gövdeyle aynı cümleyle reddedilir.
+        if (env === 'sms' && raw.length === 0) return send(frameworkError(env, 'invalid_request', UNREADABLE_BODY));
         // Kontrol uçları (/__mock/*) her zaman JSON ister: tarayıcının ön kontrolsüz (text/plain, form)
         // istekleri mock durumunu değiştiremez. Gövdesiz JSON isteği boş nesne sayılır.
         const control = path.startsWith('/__mock/');
@@ -276,8 +287,10 @@ export function createMockServer(options = {}) {
         } else if (isJson && !(control && raw.length === 0)) {
           // SMS API: boş, bozuk ya da nesne olmayan gövde aynı cümleyle reddedilir.
           const unreadable = env === 'sms' ? UNREADABLE_BODY : null;
-          if (raw.length === 0) return send(frameworkError(env, 'invalid_request', unreadable ?? 'request body is empty'));
-          try { parsed.json = JSON.parse(raw.toString('utf8')); }
+          // Baştaki UTF-8 BOM atılır; yalnızca BOM'dan oluşan gövde boş sayılır.
+          const text = stripBom(raw.toString('utf8'));
+          if (text.length === 0) return send(frameworkError(env, 'invalid_request', unreadable ?? 'request body is empty'));
+          try { parsed.json = JSON.parse(text); }
           catch { return send(frameworkError(env, 'invalid_request', unreadable ?? 'malformed JSON')); }
           if (env === 'sms' && (parsed.json === null || typeof parsed.json !== 'object' || Array.isArray(parsed.json))) {
             return send(frameworkError(env, 'invalid_request', unreadable));

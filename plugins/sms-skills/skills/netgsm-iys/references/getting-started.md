@@ -69,8 +69,9 @@ Content-Type: application/json
   `refresh_token` döner. Her İYS isteğine `Authorization: Bearer <access_token>` eklenir.
 - Token **önbelleğe alınır**: `POST /auth/v3/token` IP başına dakikada 30 istekle sınırlıdır. Süre
   dolmadan `POST /auth/v3/token/refresh` (`{ "refresh_token": "..." }`) ile yenilenir ve yanıttaki
-  yeni `access_token` ile `refresh_token` saklanır. Yenileme o oturumun eski access token'ını geçersiz
-  kılar; aynı refresh token birden fazla süreçte koordinasyonsuz kullanılmaz.
+  yeni `access_token` ile `refresh_token` saklanır ve hemen yeni token'a geçilir. Eski access token'ın
+  hemen reddedileceğine de bir süre daha kabul edileceğine de güvenilmez; aynı refresh token birden fazla
+  süreçte koordinasyonsuz kullanılmaz.
 - İYS API'den `401` (`errorCode` 50 `UNAUTHENTICATED`, 51 `TOKEN_NOT_FOUND`, 52 `INVALID_TOKEN`, 53
   `SESSION_EXPIRED`) alınırsa yeniden giriş yapılır ve istek bir kez tekrarlanır. Yeni token ile de
   `401` alınıyorsa döngüye girilmez; kimlik bilgileri ve hesap kontrol edilir.

@@ -327,6 +327,7 @@ export function registerSendFamilyRoutes(ctx) {
   // ---- POST /send/otp
   // Sıra: gövde JSON (sunucu) → token gönderildi → zorunlu alanlar ve numara → token geçerli → yetki
   // (x-client dahil) → başlık → metin uzunluğu → kredi. İstek sınırı yoktur.
+  // Bu sıra diğer SMS uçlarından farklıdır; sunucunun gövdeden önceki token denetimi (authFirst) bu uçta kapalıdır.
   ctx.routes.add('POST', SEND_OTP, (req) => {
     const auth = authenticate(req, ctx);
     if ('status' in auth && auth.body.message === 'no bearer token') return auth;
@@ -359,7 +360,7 @@ export function registerSendFamilyRoutes(ctx) {
       records: [{ index: 0, recipient: `90${body.recipient.slice(-10)}`, text }], referenceId: null,
     });
     return { status: 202, body: { jobId: job.jobId } };
-  });
+  }, { authFirst: false });
 
   // ---- GET /templates
   ctx.routes.add('GET', '/sms/v3/templates', (req) => {

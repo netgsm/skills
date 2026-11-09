@@ -261,7 +261,9 @@ doğrulayın.
 - **Kaçanları tamamlayın.** Adresiniz bir süre erişilemezse o süredeki raporları `GET /report`, gelen
   SMS'leri `GET /inbox` ile alın.
 - **`headers` değerini doğrulayın** ve bu değeri gizli tutun. Değerde `,` ve `:` olamayacağı için
-  token'ı buna göre üretin.
+  token'ı buna göre üretin. Alıcı, beklenen token tanımsız ya da boşsa **her isteği reddetmeli**
+  (fail-closed), başlığı zorunlu tutmalı ve sabit zamanlı karşılaştırma kullanmalıdır
+  (bkz. [examples](../examples/)).
 - **Adres genel (public) olmalıdır.** Canlı API `localhost`, `127.0.0.1` ya da özel ağ adreslerini
   kabul etmez. Geliştirme makinenizde canlı webhook almak için dışarıdan erişilebilen bir adres (örneğin
   bir tünel) gerekir.

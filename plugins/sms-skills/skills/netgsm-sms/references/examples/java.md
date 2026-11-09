@@ -16,6 +16,8 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -243,7 +245,11 @@ class NetgsmReportWebhook {
     @PostMapping("/netgsm/report")
     ResponseEntity<Void> report(@RequestHeader(value = "X-Webhook-Token", required = false) String token, @RequestBody JsonNode body) {
         // Kayıtta verdiğiniz başlıkla isteğin sizden geldiğini doğrulayın.
-        if (!Objects.equals(token, System.getenv("NETGSM_WEBHOOK_TOKEN"))) return ResponseEntity.status(401).build();
+        // Token tanımsız ya da boşsa istek reddedilir (fail-closed): aksi hâlde başlıksız istek de kabul edilirdi.
+        String expected = System.getenv("NETGSM_WEBHOOK_TOKEN");
+        if (expected == null || expected.isEmpty()) return ResponseEntity.status(500).build();
+        if (token == null || !MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8), expected.getBytes(StandardCharsets.UTF_8)))
+            return ResponseEntity.status(401).build(); // sabit zamanlı karşılaştırma
         for (JsonNode n : body.path("numbers")) {
             int status = n.path("status").asInt();
             String state = status == 1 ? "DELIVERED" : "NOT_DELIVERED";

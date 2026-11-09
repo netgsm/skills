@@ -111,6 +111,11 @@ tarih, sayı olmayan `templateId`, nesne ya da dizi verilmiş `params` değeri g
 
 ## Dikkat edilecekler
 
+- **Yurt dışı alıcıda uzunluk sınırı çelişkisi.** Yayımlanan spec `templates[].recipient` için iki sınır
+  taşır ve bunlar uyuşmaz: `maxLength: 17` ile `^(90\d{10}|-\d{9,17})$` deseni (yurt dışı: `-` ve 17
+  rakam = 18 karakter). Daha kısıtlayıcı olana güvenin: alıcı en fazla **17 karakter** olmalıdır, yani
+  yurt dışında `-` ve en fazla 16 rakam. Mock da böyle davranır: 17 karakterden uzun alıcıyı deseni
+  denemeden `400` ile reddeder. Spec'i bu yüzden düzeltmeyin; 18 karakterlik bir numarayı göndermeyin.
 - **Şablon hataları isteğin tamamını reddeder.** `/send`'den farklı olarak eksik ya da geçersiz
   `templateId` veya `recipient`, hesabın kullanamadığı şablon ya da uymayan parametre `400` döndürür ve
   hiçbir şey gönderilmez. Şablonlar doldurulduktan sonra kayıtlar `/send`'deki gibi tek tek

@@ -4,8 +4,12 @@ Tek seferlik denemeler için [testing.md](../testing.md) ve uç nokta dosyaları
 yeterlidir. Bu sayfa, cron işi ya da operasyon betiği olarak çalışabilecek tam akışı gösterir: token
 önbelleği → tek `/send` → `rejectedItems` → hata dalları (401 / 429 / 5xx).
 
-Gerekenler: `bash`, `curl`, `jq`. Kimlik bilgileri ortam değişkenlerinden okunur. `NETGSM_BASE_URL`
-verilmezse betik mock'a gider.
+Gerekenler: `bash`, `curl` (7.55+), `jq`. Kimlik bilgileri ortam değişkenlerinden okunur (`export` edilmiş
+olmalı). `NETGSM_BASE_URL` verilmezse betik mock'a gider.
+
+Şifre ve Bearer token `ps` çıktısında görünmesin diye süreç argümanlarına konmaz: şifre `jq`'ya `env` ile
+verilir ve gövde `curl`'e stdin'den gider; token ise yalnızca sahibinin okuyabildiği geçici bir
+başlık dosyasına yazılıp `-H @dosya` ile verilir (`printf` kabuğun yerleşik komutudur, süreç oluşturmaz).
 
 ```bash
 #!/usr/bin/env bash
@@ -22,9 +26,13 @@ RECIPIENTS="$1"; TEXT="$2"
 umask 077; mkdir -p "$(dirname "$CACHE")"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
-# POST + JSON gövde stdin'den (şifre komut satırında görünmez). Yanıt $TMP/resp.json, başlıklar $TMP/headers.txt.
+# POST + JSON gövde stdin'den, token başlık dosyasından (ikisi de komut satırında görünmez).
+# Yanıt $TMP/resp.json, başlıklar $TMP/headers.txt.
 post() {  # $1 = yol, $2 = Bearer token (boş olabilir); stdout'a HTTP durum kodu yazar
-  local auth=(); [ -n "${2:-}" ] && auth=(-H "Authorization: Bearer $2")
+  local auth=()
+  if [ -n "${2:-}" ]; then
+    printf 'Authorization: Bearer %s\n' "$2" > "$TMP/auth.hdr"; auth=(-H "@$TMP/auth.hdr")
+  fi
   curl -s -o "$TMP/resp.json" -D "$TMP/headers.txt" -w '%{http_code}' -X POST "$BASE$1" ${auth[@]+"${auth[@]}"} \
     -H 'Content-Type: application/json' -H 'Accept: application/json' --data-binary @-
 }
@@ -67,7 +75,7 @@ renew() {  # kilit altında çalışır; başka bir çalıştırma az önce yeni
     [ "$now" -lt "$(jq -r .expires_at "$CACHE")" ] && { jq -r .access_token "$CACHE"; return; }
   fi
   local status
-  status=$(jq -n --arg u "$NETGSM_USERNAME" --arg p "$NETGSM_PASSWORD" '{username: $u, password: $p, scope: "sms"}' |
+  status=$(jq -n '{username: env.NETGSM_USERNAME, password: env.NETGSM_PASSWORD, scope: "sms"}' |
     post /auth/v3/token)
   if [ "$status" != 200 ]; then
     echo "token hatası: $status $(jq -r '"\(.code) request_id=\(.request_id)"' "$TMP/resp.json")" >&2; return 1
@@ -138,8 +146,9 @@ Kampanya betiğinden önce bir kez çalıştırılacak bakiye kontrolü
 başına dakikada 60 istek; yanıt 10 sn önbellekte).
 
 ```bash
+printf 'Authorization: Bearer %s\n' "$(token)" > "$TMP/auth.hdr"   # token komut satırında görünmesin
 STATUS=$(curl -s -o "$TMP/bal.json" -D "$TMP/headers.txt" -w '%{http_code}' \
-  -H "Authorization: Bearer $(token)" -H 'Accept: application/json' "$BASE/sms/v3/balance?stip=3")
+  -H "@$TMP/auth.hdr" -H 'Accept: application/json' "$BASE/sms/v3/balance?stip=3")
 case "$STATUS" in
   200)
     # Varlıklar sıraya göre değil adıyla (büyük/küçük harfe duyarsız) bulunur. amount metin ya da sayı olabilir;

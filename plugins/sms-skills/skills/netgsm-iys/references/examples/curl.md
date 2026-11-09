@@ -8,8 +8,10 @@ https://api-docs.netgsm.com.tr/iys/save-consents/ · token: https://api-docs.net
 > çalıştırmaz. `POST /consents` yalnızca alıcıdan gerçekten alınmış bir izin için ve kalıcı, hukuki
 > kayıt oluşturacağı bilinerek çalıştırılır.
 
-Gerekenler: `bash`, `curl`, `jq`. Kimlik bilgileri ve marka kodu ortam değişkenlerinden okunur; şifre
-komut satırına yazılmaz (gövde stdin'den gider).
+Gerekenler: `bash`, `curl` (7.55+), `jq`. Kimlik bilgileri ve marka kodu ortam değişkenlerinden okunur
+(`export` edilmiş olmalı). Şifre ve Bearer token `ps` çıktısında görünmesin diye süreç argümanlarına konmaz:
+şifre `jq`'ya `env` ile verilir ve gövde `curl`'e stdin'den gider; token yalnızca sahibinin
+okuyabildiği geçici bir başlık dosyasına yazılıp `-H @dosya` ile verilir.
 
 ## Token (önbellekli)
 
@@ -20,12 +22,13 @@ set -euo pipefail
 BASE=${NETGSM_BASE_URL:-'https://ext-api.netgsm.com.tr'}   # İYS yalnızca canlıdır
 CACHE="${NETGSM_IYS_TOKEN_CACHE:-$HOME/.cache/netgsm-iys-token.json}"
 umask 077; mkdir -p "$(dirname "$CACHE")"
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 token() {  # önbellekteki token geçerliyse onu, değilse yenisini yazar (IP başına dakikada 30 token sınırı)
   local now; now=$(date +%s)
   if [ -s "$CACHE" ] && [ "$now" -lt "$(jq -r .refresh_at "$CACHE")" ]; then jq -r .access_token "$CACHE"; return; fi
   local resp
-  resp=$(jq -n --arg u "$NETGSM_USERNAME" --arg p "$NETGSM_PASSWORD" '{username: $u, password: $p, scope: "sms"}' |
+  resp=$(jq -n '{username: env.NETGSM_USERNAME, password: env.NETGSM_PASSWORD, scope: "sms"}' |
     curl -s -X POST "$BASE/auth/v3/token" -H 'Content-Type: application/json' --data-binary @-)
   if ! jq -e .access_token >/dev/null <<<"$resp"; then
     echo "token hatası: $(jq -r '"\(.code) request_id=\(.request_id)"' <<<"$resp")" >&2; return 1
@@ -34,7 +37,7 @@ token() {  # önbellekteki token geçerliyse onu, değilse yenisini yazar (IP ba
     <<<"$resp" > "$CACHE"
   jq -r .access_token "$CACHE"
 }
-TOKEN=$(token)
+printf 'Authorization: Bearer %s\n' "$(token)" > "$TMP/auth.hdr"   # sonraki isteklerde -H @"$TMP/auth.hdr"
 ```
 
 Bu taslak süresi yaklaşan token için yeniden giriş yapar; uzun süre çalışan servislerde refresh ve
@@ -48,7 +51,7 @@ kullanılır.
 ```bash
 RID="iys-query-$(date +%s)"
 curl -s -G "$BASE/iys/v1/consents" \
-  -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json' -H "X-Request-Id: $RID" \
+  -H "@$TMP/auth.hdr" -H 'Accept: application/json' -H "X-Request-Id: $RID" \
   -D headers.txt \
   --data-urlencode "brandCode=$NETGSM_IYS_BRAND_CODE" \
   --data-urlencode "data[0][recipient]=$IYS_RECIPIENT" \
@@ -79,7 +82,7 @@ izin demektir; `errorCode=81` kayıt yok demektir.
 RID="iys-save-$(date +%s)"
 jq --argjson b "$NETGSM_IYS_BRAND_CODE" '.brandCode = $b' consent.json |
   curl -s -o resp.json -w '%{http_code}\n' -D headers.txt -X POST "$BASE/iys/v1/consents" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H "X-Request-Id: $RID" \
+    -H "@$TMP/auth.hdr" -H 'Content-Type: application/json' -H "X-Request-Id: $RID" \
     --data-binary @-
 jq '{success, errorCode, message, uid: .data.uid, erroritem: .data.erroritem}' resp.json
 grep -i '^x-thread-id' headers.txt
