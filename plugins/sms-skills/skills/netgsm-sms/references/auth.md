@@ -92,8 +92,14 @@ Yanıt, token alma yanıtıyla aynıdır.
 
 - Yanıttaki **yeni** `access_token` ve `refresh_token` saklanır. `refresh_token` değeri aynı kalabilir,
   ama her zaman yanıttaki değer saklanmalıdır.
-- Yenilemeden sonra o oturumun **önceki access token'ı geçersiz olur**: oturum başına tek geçerli access
-  token vardır.
+- Yenilemeden sonra **hemen yeni access token'a geçilir**: oturum başına tek geçerli access token vardır
+  ve önceki token artık kullanılmaz.
+- Önceki token'ın ne zaman reddedileceği kesin değildir. Gözlenen davranış: yenilemeden hemen önce
+  kullanılmış eski access token SMS API'de kısa bir süre (gözlemlerde yaklaşık bir dakikadan kısa) daha
+  kabul edilebilir; hiç kullanılmamış eski token ise hemen `401 UNAUTHENTICATED` alır. Bu bir sözleşme
+  değildir: istemci ne eski token'ın hemen reddedileceğine ne de bir süre daha çalışacağına güvenir. Eski
+  token'la yola çıkmış bir istek `401` alırsa yeni token'la bir kez tekrarlanır
+  ([önerilen istemci deseni](#önerilen-istemci-deseni)).
 - Yenilemede kapsam değişmez.
 - Süresi dolmuş ya da sonlandırılmış bir oturumun refresh token'ı `401 invalid_refresh_token` alır.
   UUID olmayan bir değer de aynı hatayı alır. Bu durumda `POST /auth/v3/token` ile yeniden giriş yapılır.
@@ -132,7 +138,8 @@ kullanıcısı girişinde örnek yanıt:
 
 `sub_user_id` `0` ve `sub_user` `null` ise giriş ana hesapla yapılmıştır. `/me` yanıtı token ve istemci
 IP'si başına kısa süre (varsayılan 30 sn) önbellekte tutulur: revoke edilen token hemen geçersiz görünür,
-ama refresh sonrası eski access token bu süre boyunca `/me`'de geçerli görünebilir.
+ama refresh sonrası eski access token bu süre boyunca `/me`'de geçerli görünebilir. SMS API'deki
+davranış için [token yenileme](#token-yenileme).
 
 ## Scope
 
@@ -172,10 +179,11 @@ SMS ile ilgili scope'lar:
 
 - Her `POST /auth/v3/token` çağrısı **ayrı bir oturum** açar. Aynı kimlikle açılan birden fazla oturum
   birlikte geçerli kalır.
-- Refresh yalnızca **kendi oturumunun** eski access token'ını geçersiz kılar.
+- Refresh yalnızca **kendi oturumunun** eski access token'ını geçersiz kılar (kısa geçiş için
+  [token yenileme](#token-yenileme)).
 - Bu yüzden her süreç ya da pod kendi oturumunu tutabilir. Tek kural: **aynı refresh token birden fazla
   süreçte koordinasyonsuz kullanılmaz.** Bir süreç yenilediğinde, aynı oturumu kullanan diğer süreçlerin
-  elindeki access token geçersiz olur.
+  elindeki access token geçersiz sayılmalıdır: kısa bir süre daha kabul edilebilir, ama her an `401` alabilir.
 - **Aynı hesapta API için tek bir kimlik kullanın.** Ana hesap ile alt kullanıcı aynı hesapta sırayla
   giriş yaptığında birbirlerinin önceki oturumları düşebilir (`401 invalid_token`).
 - Identity'den `401 invalid_token` ya da SMS API'den `401 UNAUTHENTICATED` alınırsa refresh yerine
@@ -218,18 +226,22 @@ class NetgsmTokenManager {
   }
 
   private async renew(): Promise<string> {
-    if (this.tokens) {
-      const r = await this.post('/auth/v3/token/refresh', { refresh_token: this.tokens.refresh });
+    const old = this.tokens;
+    if (old) {
+      const r = await this.post('/auth/v3/token/refresh', { refresh_token: old.refresh });
       if (r.ok) return this.store(await r.json());
       const p = await r.json().catch(() => ({}));
-      if (p.code !== 'invalid_refresh_token') {
+      // Refresh beklenirken invalidate() token'ı silmiş olabilir; o zaman eski token kullanılmaz.
+      const invalidated = this.tokens !== old;
+      if (p.code !== 'invalid_refresh_token' && !invalidated) {
         // Geçici hata (429, 5xx): eski token hâlâ geçerliyse onu kullan ve 30 sn sonra yeniden dene.
-        if (Date.now() < this.tokens.expiresAt) {
+        if (Date.now() < old.expiresAt) {
           this.retryAfterMs = Date.now() + 30_000;
-          return this.tokens.access;
+          return old.access;
         }
         throw new Error(`refresh: ${p.code} ${p.request_id}`);
       }
+      this.tokens = undefined; // oturum bitmiş ya da token geçersiz kılınmış: yeniden giriş
     }
     const r = await this.post('/auth/v3/token', { username: this.username, password: this.password, scope: 'sms' });
     if (!r.ok) {
