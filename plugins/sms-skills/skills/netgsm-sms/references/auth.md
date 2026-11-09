@@ -228,19 +228,26 @@ class NetgsmTokenManager {
   private async renew(): Promise<string> {
     const old = this.tokens;
     if (old) {
-      const r = await this.post('/auth/v3/token/refresh', { refresh_token: old.refresh });
-      if (r.ok) return this.store(await r.json());
-      const p = await r.json().catch(() => ({}));
+      let r: Response | undefined;
+      let networkError: unknown;
+      try {
+        r = await this.post('/auth/v3/token/refresh', { refresh_token: old.refresh });
+      } catch (err) {
+        networkError = err; // ağ hatası: geçici hata gibi
+      }
+      if (r?.ok) return this.store(await r.json());
+      const p = r ? await r.json().catch(() => ({})) : {};
       // Refresh beklenirken invalidate() token'ı silmiş olabilir; o zaman eski token kullanılmaz.
       const invalidated = this.tokens !== old;
       if (p.code !== 'invalid_refresh_token' && !invalidated) {
-        // Geçici hata (429, 5xx): eski token hâlâ geçerliyse onu kullan ve 30 sn sonra yeniden dene.
+        // Geçici hata (ağ, 429, 5xx): eski token hâlâ geçerliyse onu kullan ve 30 sn sonra yeniden dene.
         if (Date.now() < old.expiresAt) {
           this.retryAfterMs = Date.now() + 30_000;
           return old.access;
         }
-        throw new Error(`refresh: ${p.code} ${p.request_id}`);
+        throw r ? new Error(`refresh: ${p.code} ${p.request_id}`) : networkError;
       }
+      if (!r) throw networkError; // token geçersiz kılınmış ve refresh yanıtı yok
       this.tokens = undefined; // oturum bitmiş ya da token geçersiz kılınmış: yeniden giriş
     }
     const r = await this.post('/auth/v3/token', { username: this.username, password: this.password, scope: 'sms' });

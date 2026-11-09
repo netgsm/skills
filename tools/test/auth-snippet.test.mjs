@@ -75,6 +75,41 @@ test('auth.md taslağı: refresh beklenirken invalidate() çağrılırsa çökme
   assert.deepEqual(calls, ['/auth/v3/token', '/auth/v3/token/refresh', '/auth/v3/token']);
 });
 
+test('auth.md taslağı: refresh\'te ağ hatası geçici hata gibidir; eski token süresi dolmuş ya da geçersiz kılınmışsa hata fırlar', async () => {
+  const NetgsmTokenManager = await loadManager();
+  const clock = { t: 0 };
+  let calls = [];
+  let gate = Promise.resolve();
+  let release = () => {};
+  const fakeFetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    calls.push(path);
+    if (path.endsWith('/refresh')) { await gate; throw new TypeError('fetch failed'); }
+    return tokenRes(1);
+  };
+  await withFakes(fakeFetch, clock, async () => {
+    let manager = new NetgsmTokenManager('https://example.com', 'u', 'p');
+    assert.equal(await manager.get(), 'a1');
+    clock.t = 3600_000 - 120_000;
+    for (let i = 0; i < 10; i++) assert.equal(await manager.get(), 'a1');
+    assert.equal(calls.filter((p) => p.endsWith('/refresh')).length, 1);
+    clock.t = 4000_000; // süresi doldu
+    await assert.rejects(manager.get(), /fetch failed/);
+
+    clock.t = 0; calls = [];
+    gate = new Promise((r) => { release = r; });
+    manager = new NetgsmTokenManager('https://example.com', 'u', 'p');
+    assert.equal(await manager.get(), 'a1');
+    clock.t = 3600_000 - 60_000;
+    const pending = manager.get();
+    await new Promise((r) => setImmediate(r));
+    manager.invalidate('a1');
+    release();
+    await assert.rejects(pending, /fetch failed/);
+    assert.deepEqual(calls, ['/auth/v3/token', '/auth/v3/token/refresh']);
+  });
+});
+
 test('auth.md taslağı: başarısız refresh sonrası 30 sn eski token kullanılır, refresh tekrarlanmaz', async () => {
   const NetgsmTokenManager = await loadManager();
   const clock = { t: 0 };

@@ -376,19 +376,27 @@ export class NetgsmTokenManager {
   private async renew(): Promise<string> {
     const old = this.tokens;
     if (old) {
-      const r = await this.post('/auth/v3/token/refresh', { refresh_token: old.refresh });
-      if (r.ok) return this.store(await r.json());
-      const p = await readJson(r);
+      let r: Response | undefined;
+      let networkError: NetgsmApiError | undefined;
+      try {
+        r = await this.post('/auth/v3/token/refresh', { refresh_token: old.refresh });
+      } catch (err) {
+        if (!(err instanceof NetgsmApiError)) throw err;
+        networkError = err; // ağ hatası: geçici hata gibi
+      }
+      if (r?.ok) return this.store(await r.json());
+      const p: any = r ? await readJson(r) : {};
       // Refresh beklenirken invalidate() token'ı silmiş olabilir; o zaman eski token kullanılmaz.
       const invalidated = this.tokens !== old;
       if (p.code !== 'invalid_refresh_token' && !invalidated) {
-        // Geçici hata (429, 5xx): eski token hâlâ geçerliyse onu kullan ve 30 sn sonra yeniden dene.
+        // Geçici hata (ağ, 429, 5xx): eski token hâlâ geçerliyse onu kullan ve 30 sn sonra yeniden dene.
         if (this.now() < old.expiresAt) {
           this.retryAfterMs = this.now() + REFRESH_BACKOFF_MS;
           return old.access;
         }
-        throw this.identityError('POST /auth/v3/token/refresh', r, p);
+        throw r ? this.identityError('POST /auth/v3/token/refresh', r, p) : networkError;
       }
+      if (!r) throw networkError; // token geçersiz kılınmış ve refresh yanıtı yok
       this.tokens = undefined; // oturum bitmiş ya da token geçersiz kılınmış: yeniden giriş
     }
     const r = await this.post('/auth/v3/token', { username: this.username, password: this.password, scope: this.scope });

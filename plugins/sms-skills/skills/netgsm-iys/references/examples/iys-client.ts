@@ -211,14 +211,22 @@ class TokenManager {
   private async renew(): Promise<string> {
     const old = this.tokens;
     if (old) {
-      const r = await this.post('/auth/v3/token/refresh', { refresh_token: old.refresh });
-      if (r.ok) return this.store(await r.json());
-      // Geçici refresh hatasında eski token hâlâ geçerliyse onunla devam edilir ve 30 sn yeniden refresh
-      // denenmez; ancak refresh beklenirken invalidate() token'ı silmişse (this.tokens !== old) yeniden giriş yapılır.
-      if (r.status !== 401 && this.tokens === old && this.o.now() < old.expiresAt) {
+      let r: Response | undefined;
+      let networkError: IysApiError | undefined;
+      try {
+        r = await this.post('/auth/v3/token/refresh', { refresh_token: old.refresh });
+      } catch (err) {
+        if (!(err instanceof IysApiError)) throw err;
+        networkError = err; // ağ hatası: geçici hata gibi
+      }
+      if (r?.ok) return this.store(await r.json());
+      // Geçici refresh hatasında (ağ, 401 dışı yanıt) eski token hâlâ geçerliyse onunla devam edilir ve 30 sn
+      // yeniden refresh denenmez; ancak refresh beklenirken invalidate() token'ı silmişse (this.tokens !== old) kullanılmaz.
+      if (r?.status !== 401 && this.tokens === old && this.o.now() < old.expiresAt) {
         this.retryAfterMs = this.o.now() + REFRESH_BACKOFF_MS;
         return old.access;
       }
+      if (!r) throw networkError; // refresh yanıtı yok ve eski token kullanılamıyor
       this.tokens = undefined;
     }
     // İYS için de scope "sms" (Netgsm kuralı; sözleşme scope belirtmez).
@@ -244,12 +252,19 @@ class TokenManager {
     return t.access_token;
   }
 
-  private post(path: string, body: unknown): Promise<Response> {
-    return this.o.fetch(this.o.baseUrl + path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(body),
-    });
+  private async post(path: string, body: unknown): Promise<Response> {
+    try {
+      return await this.o.fetch(this.o.baseUrl + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      // Token isteğinin yanıtı alınamadı. İYS isteği henüz gönderilmedi: daha sonra tekrar denemek güvenlidir.
+      throw new IysApiError({
+        operation: `POST ${path}`, status: 0, errorCode: 'NETWORK', detail: (err as Error).message, threadId: null, retryable: true,
+      });
+    }
   }
 }
 

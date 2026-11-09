@@ -230,3 +230,36 @@ test('başarısız refresh sonrası eski token 30 sn kullanılır: 10 istekte te
   assert.equal(refreshes(), 2);
   assert.equal(calls.filter((p) => p === '/auth/v3/token').length, 1, 'yeniden giriş yok');
 });
+
+test('refresh\'te ağ hatası: eski token geçerliyse 30 sn onunla devam; süresi dolmuşsa NETWORK hatası; girişte ağ hatası retryable', async () => {
+  let t = 0;
+  let loginFails = false;
+  const calls = [];
+  const fakeFetch = async (input, init = {}) => {
+    const path = new URL(String(input)).pathname;
+    calls.push(path);
+    if (path === '/auth/v3/token/refresh') throw new TypeError('fetch failed');
+    if (path === '/auth/v3/token') {
+      if (loginFails) throw new TypeError('fetch failed');
+      return Response.json({ ...TOKEN, access_token: 'acc-1', expires_in: 3600 });
+    }
+    return Response.json(ok({ uid: init.headers.Authorization }));
+  };
+  const client = new IysClient({
+    baseUrl: BASE, username: 'u', password: 'p', brandCode: 123456, fetch: fakeFetch, now: () => t, sleep: async () => {},
+  });
+  const refreshes = () => calls.filter((p) => p === '/auth/v3/token/refresh').length;
+  await client.saveWebhook('https://example.com/h');
+  t = 3600_000 - 120_000;
+  for (let i = 0; i < 10; i++) assert.equal((await client.saveWebhook('https://example.com/h')).uid, 'Bearer acc-1');
+  assert.equal(refreshes(), 1);
+  t = 4000_000; // eski token'ın süresi doldu
+  await assert.rejects(client.saveWebhook('https://example.com/h'),
+    (e) => e instanceof IysApiError && e.errorCode === 'NETWORK' && e.retryable && !e.mayHaveBeenProcessed);
+  assert.equal(calls.filter((p) => p === '/iys/v1/webhooks').length, 11, 'İYS isteği gönderilmedi');
+
+  loginFails = true;
+  const fresh = new IysClient({ baseUrl: BASE, username: 'u', password: 'p', brandCode: 123456, fetch: fakeFetch, sleep: async () => {} });
+  await assert.rejects(fresh.saveWebhook('https://example.com/h'),
+    (e) => e instanceof IysApiError && e.errorCode === 'NETWORK' && e.status === 0 && e.retryable);
+});

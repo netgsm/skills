@@ -494,6 +494,53 @@ test('refresh beklenirken invalidate() çağrılırsa çökmez, yeniden giriş y
   assert.deepEqual(calls, ['/auth/v3/token', '/auth/v3/token/refresh', '/auth/v3/token']);
 });
 
+test('refresh\'te ağ hatası: eski token geçerliyse 30 sn onunla devam; süresi dolmuş ya da geçersiz kılınmışsa NETWORK_ERROR', async () => {
+  let t = 0;
+  let calls = [];
+  let release = () => {};
+  let gate = Promise.resolve();
+  const fakeFetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    calls.push(path);
+    if (path.endsWith('/refresh')) { await gate; throw new TypeError('fetch failed'); }
+    return Response.json({ access_token: 'a1', refresh_token: '00000000-0000-4000-8000-000000000000', expires_in: 3600 });
+  };
+  const make = () => new NetgsmTokenManager({ baseUrl: 'https://example.com', username: 'u', password: 'p', scope: 'sms', fetch: fakeFetch, now: () => t });
+  const refreshes = () => calls.filter((p) => p.endsWith('/refresh')).length;
+
+  // Eski token geçerli: kullanılır, 30 sn refresh denenmez.
+  let m = make();
+  assert.equal(await m.get(), 'a1');
+  t = 3600_000 - 120_000;
+  for (let i = 0; i < 10; i++) assert.equal(await m.get(), 'a1');
+  assert.equal(refreshes(), 1);
+  t += 30_001;
+  assert.equal(await m.get(), 'a1');
+  assert.equal(refreshes(), 2);
+
+  // Eski token'ın süresi dolmuş: NETWORK_ERROR, retryable.
+  t = 4000_000;
+  const expired = await m.get().then(() => assert.fail('hata bekleniyordu'), e => e);
+  assert.ok(expired instanceof NetgsmApiError);
+  assert.equal(expired.code, 'NETWORK_ERROR');
+  assert.equal(expired.retryable, true);
+
+  // Refresh beklenirken invalidate(): eski token kullanılmaz, NETWORK_ERROR.
+  t = 0; calls = [];
+  gate = new Promise((r) => { release = r; });
+  m = make();
+  assert.equal(await m.get(), 'a1');
+  t = 3600_000 - 60_000;
+  const pending = m.get();
+  await new Promise((r) => setImmediate(r));
+  m.invalidate('a1');
+  release();
+  const inv = await pending.then(() => assert.fail('hata bekleniyordu'), e => e);
+  assert.ok(inv instanceof NetgsmApiError);
+  assert.equal(inv.code, 'NETWORK_ERROR');
+  assert.deepEqual(calls, ['/auth/v3/token', '/auth/v3/token/refresh']);
+});
+
 // ---- Yanıt alınamayan istekler (ağ hatası, zaman aşımı, iptal): gönderimde belirsiz sonuç, tekrar yok
 
 /** Token isteğine yanıt verir; /sms/v3 isteklerinde `onSms`'i çağırır. Her çağrıyı `calls`'a yazar. */
