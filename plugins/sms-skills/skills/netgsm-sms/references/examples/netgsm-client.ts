@@ -1,5 +1,5 @@
 /**
- * Netgsm SMS API v3 için bağımlılıksız TypeScript istemcisi (Node ≥ 18, global `fetch`).
+ * Netgsm SMS API v3 için bağımlılıksız TypeScript istemcisi (Node ≥ 20, global `fetch`).
  *
  * YALNIZCA SUNUCU TARAFINDA kullanın. Kullanıcı adı ve şifre tarayıcıya, mobil uygulamaya ya da
  * istemciye giden bir pakete (ör. `NEXT_PUBLIC_*`) asla konmaz; ortam değişkeninden okunur.
@@ -26,6 +26,10 @@
  *   (`/stats`, jobIds'li `/report`) tekrar YOK: hatayla biten okuma da sayaca sayılır, hemen tekrar
  *   429 alır. Hata `retryable: true` döner; görev penceresi dolunca (report 1 dk, stats 10 dk) deneyin.
  * - Okunamayan `Retry-After` (sayı ya da HTTP tarihi değil) → tekrar yok, `retryable: true`.
+ * - Ağ hatası, zaman aşımı ya da iptal (`fetch` reddedildi; `status: 0`, `code: 'NETWORK_ERROR'`) → tekrar YOK.
+ *   Yanıt alınamadı ama istek ulaşmış olabilir: GET olmayan isteklerde (iptal hariç; gönderim, OTP, şablon ve
+ *   rehber gönderimi dahil) 5xx gibi `mayHaveBeenQueued: true`, `retryable: false`. Okuma ve iptalde `retryable: true`.
+ *   `2xx` yanıtın gövdesi okunamazsa (`code: 'INVALID_RESPONSE'`) tekrar yok; gönderim kabul edilmiş olabilir.
  * - `400`, `403`, `413`, `422` ve diğer 4xx → tekrar yok, `retryable: false`.
  * - `202` yanıtındaki `rejectedItems` olduğu gibi döner; çağıran işler.
  * - `GET /balance` (`getBalance`): `429`'da beklemez ve tekrar etmez; `retryable: true` ve `retryAfterSec`
@@ -242,9 +246,12 @@ export function webhookToReport(e: Pick<ReportWebhookEntry, 'status' | 'operator
 // --- Hata ----------------------------------------------------------------------------------------
 
 export class NetgsmApiError extends Error {
-  /** HTTP durum kodu. */
+  /** HTTP durum kodu; yanıt alınamadıysa (ağ hatası, zaman aşımı, iptal) 0. */
   readonly status: number;
-  /** SMS API `code` (ör. REJECTED_HEADER) ya da Identity `code` (ör. invalid_credentials). Mantık buna göre kurulur. */
+  /**
+   * SMS API `code` (ör. REJECTED_HEADER) ya da Identity `code` (ör. invalid_credentials). Mantık buna göre kurulur.
+   * İstemcinin kendi kodları: `NETWORK_ERROR` (yanıt alınamadı), `INVALID_RESPONSE` (2xx gövdesi okunamadı).
+   */
   readonly code: string;
   /** SMS `requestId` ya da Identity `request_id`. Loglayın; destek talebinde paylaşın. */
   readonly requestId: string | null;
@@ -252,7 +259,7 @@ export class NetgsmApiError extends Error {
   readonly retryAfterSec: number | null;
   /** true: aynı istek daha sonra değiştirilmeden tekrar denenebilir. */
   readonly retryable: boolean;
-  /** true: toplu gönderimde (/send, /send/template, /directory/send) herhangi bir 5xx ya da diğer GET olmayan isteklerde (iptal hariç) 503 dışında bir 5xx. İşlem yapılmış olabilir; körlemesine tekrar göndermeyin, önce GET /report. */
+  /** true: toplu gönderimde (/send, /send/template, /directory/send) herhangi bir 5xx, diğer GET olmayan isteklerde (iptal hariç) 503 dışında bir 5xx ya da bu isteklerde yanıtın alınamaması (NETWORK_ERROR, INVALID_RESPONSE). İşlem yapılmış olabilir; körlemesine tekrar göndermeyin, önce GET /report. */
   readonly mayHaveBeenQueued: boolean;
   /** Yalnızca 422 NO_DELIVERABLE_MESSAGES'ta: kayıtların red nedenleri. */
   readonly rejectedItems?: RejectedItem[];
@@ -311,9 +318,14 @@ function hasPerJobLimit(path: string): boolean {
 }
 
 async function readJson(res: Response): Promise<any> {
-  const text = await res.text();
+  const text = await res.text().catch(() => ''); // gövde okunurken bağlantı kopabilir
   if (!text) return {};
   try { return JSON.parse(text); } catch { return {}; }
+}
+
+/** `fetch`'in fırlattığı hata (ağ hatası, zaman aşımı, iptal) için kısa açıklama; URL ve gövde yazılmaz. */
+function networkDetail(err: unknown): string {
+  return `ağ hatası, zaman aşımı ya da iptal (${err instanceof Error ? err.name : 'Error'}): yanıt alınamadı`;
 }
 
 // --- Token yöneticisi (references/auth.md "Önerilen istemci deseni" ile aynı davranış) -----------
@@ -410,12 +422,19 @@ export class NetgsmTokenManager {
     });
   }
 
-  private post(path: string, body: unknown): Promise<Response> {
-    return this.fetchImpl(this.baseUrl + path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(body),
-    });
+  private async post(path: string, body: unknown): Promise<Response> {
+    try {
+      return await this.fetchImpl(this.baseUrl + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      // Token isteğinin yanıtı alınamadı. SMS isteği henüz gönderilmedi: daha sonra tekrar denemek güvenlidir.
+      throw new NetgsmApiError({
+        operation: `POST ${path}`, status: 0, code: 'NETWORK_ERROR', detail: networkDetail(err), requestId: null, retryable: true,
+      });
+    }
   }
 }
 
@@ -490,12 +509,33 @@ export class NetgsmClient {
       const token = await this.tokens.get();
       const headers: Record<string, string> = { ...extraHeaders, Authorization: `Bearer ${token}`, Accept: 'application/json' };
       if (body !== undefined) headers['Content-Type'] = 'application/json';
-      const res = await this.fetchImpl(`${this.baseUrl}/sms/v3${path}`, {
-        method,
-        headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      if (res.ok) return (res.status === 204 ? undefined : await res.json()) as T;
+      // Yanıt alınamadıysa: okuma ve iptalde tekrar denenebilir; gönderimde (ve diğer GET olmayan isteklerde)
+      // istek işlenmiş olabilir, 5xx gibi körlemesine tekrar YOK, önce GET /report.
+      const uncertainHint = repeatable ? '' : '; istek işlenmiş olabilir: yeniden göndermeden önce GET /report ile kontrol edin';
+      let res: Response;
+      try {
+        res = await this.fetchImpl(`${this.baseUrl}/sms/v3${path}`, {
+          method,
+          headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+      } catch (err) {
+        // Ağ hatası / zaman aşımı / iptal. Bu döngü hiçbir istekte bunu tekrar etmez.
+        throw new NetgsmApiError({
+          operation, status: 0, code: 'NETWORK_ERROR', detail: networkDetail(err) + uncertainHint, requestId: null,
+          retryable: repeatable, mayHaveBeenQueued: !repeatable,
+        });
+      }
+      if (res.ok) {
+        if (res.status === 204) return undefined as T;
+        const text = await res.text().catch(() => '');
+        try { return JSON.parse(text) as T; } catch { /* aşağıda INVALID_RESPONSE */ }
+        // 2xx alındı ama gövde okunamadı: gönderim kabul edilmiş olabilir, jobId bilinmiyor. Tekrar YOK.
+        throw new NetgsmApiError({
+          operation, status: res.status, code: 'INVALID_RESPONSE', detail: 'yanıt gövdesi okunamadı' + uncertainHint,
+          requestId: res.headers.get('X-Request-Id'), retryable: false, mayHaveBeenQueued: !repeatable,
+        });
+      }
 
       const p = await readJson(res);
       const code: string = typeof p.code === 'string' ? p.code : `HTTP_${res.status}`;

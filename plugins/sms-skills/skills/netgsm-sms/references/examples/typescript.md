@@ -20,6 +20,8 @@ Referans istemci: [netgsm-client.ts](netgsm-client.ts). Bağımlılığı yoktur
 | `503`, diğer GET olmayan isteklerde (`/length`, `/webhooks/*`, `PUT /senders/default`) | 1, 2, 4 sn arayla en fazla 3 tekrar; `503` dışındaki 5xx'te tekrar yok, `mayHaveBeenQueued: true`. |
 | 5xx, `POST /cancel`'da | İptali tekrarlamak her zaman güvenlidir ([errors.md](../errors.md#503-ve-504-sonrası-kontrol)): 1, 2, 4 sn arayla tekrar; tükenirse `retryable: true`, `mayHaveBeenQueued: false`. Tekrardan sonra `404` bekleyen görev kalmadığını gösterir. |
 | 5xx, okuma (GET) isteklerinde | `503` gibi 1, 2, 4 sn arayla tekrar. **İstisna:** `/stats` ve `jobIds`'li `/report` otomatik tekrar edilmez. Bu sorguların görev başına sayacı vardır ve hatayla biten okuma da sayılır (`/stats`'ta `404` ve `503` dahil); hemen tekrar `429` (stats'ta ~10 dk) ve mock'ta `REPORT_POLLING` getirir. Hata `retryable: true` döner; görev penceresi dolunca (report 1 dk, stats 10 dk) yeniden deneyin. |
+| Ağ hatası, zaman aşımı, iptal (`fetch` reddedildi) | Hiçbir istekte otomatik tekrar **yok**. `status: 0`, `code: 'NETWORK_ERROR'`. Gönderimde (`/send`, `/send/otp`, `/send/template`, `/directory/send`) ve iptal dışındaki diğer GET olmayan isteklerde 5xx gibi: `mayHaveBeenQueued: true`, `retryable: false`; istek ulaşmış olabilir, önce `GET /report`. Okuma ve iptalde `retryable: true`. Token isteğinde ise SMS isteği hiç gitmemiştir: `retryable: true`, `mayHaveBeenQueued: false`. |
+| `2xx`, gövde okunamıyor | Tekrar yok. `code: 'INVALID_RESPONSE'`; gönderimde `mayHaveBeenQueued: true` (görev kabul edilmiş olabilir, `jobId` bilinmiyor). |
 | `400`, `403`, `413`, `422` | Tekrar yok, `retryable: false`. `NO_DELIVERABLE_MESSAGES`'ta hata `rejectedItems` taşır. |
 | `202` | Yanıt olduğu gibi döner; `rejectedItems` çağıranın işidir. |
 
@@ -29,8 +31,10 @@ gider; canlı adres `https://ext-api.netgsm.com.tr`'dir.
 
 Her API hatası bir `NetgsmApiError`'dır: `status`, `code`, `requestId`, `retryAfterSec`, `retryable`,
 `mayHaveBeenQueued`, `rejectedItems`. Mesajı `requestId`'yi içerir; şifre ve token hiçbir mesaja girmez.
-Ağ hatası ya da zaman aşımı (`fetch`'in fırlattığı hata) tekrar denenmez: gönderimde yanıt alınamaması
-`mayHaveBeenQueued` gibidir, istek ulaşmış olabilir.
+Ağ hatası, zaman aşımı ya da iptal (`fetch`'in fırlattığı hata, ör. `AbortSignal.timeout` ile sarılmış bir
+`fetch` verdiyseniz) de `NetgsmApiError` olur (`status: 0`, `code: 'NETWORK_ERROR'`) ve tekrar denenmez.
+Gönderimde yanıtın alınamaması `5xx` gibidir: `mayHaveBeenQueued: true`, istek ulaşmış olabilir. Bu hatayı
+kendi iş kuyruğunuzda da otomatik tekrarlamayın; önce `GET /report` ile kontrol edin.
 
 ## Kimlik bilgileri yalnızca sunucuda
 
@@ -87,7 +91,7 @@ export async function notifyCustomers(customers: { phone: string; name: string }
     if (!(err instanceof NetgsmApiError)) throw err;
     console.error('sms failed', { code: err.code, status: err.status, requestId: err.requestId });
     if (err.mayHaveBeenQueued) {
-      // 503 / 500 (ve /directory/send'de 504): gönderilmiş olabilir. Tekrar GÖNDERMEYİN: çift SMS riski.
+      // 503 / 500 (ve /directory/send'de 504) ya da yanıt alınamadı (NETWORK_ERROR): gönderilmiş olabilir. Tekrar GÖNDERMEYİN: çift SMS riski.
       // GET /report ile kontrol edin; belirsizse requestId ile teknikdestek@netgsm.com.tr.
     } else if (err.retryable) {
       // Geçici (uzun Retry-After, okuma ya da OTP'de süren 503): işi err.retryAfterSec sonra kendi iş kuyruğunuzda yeniden planlayın.
@@ -108,7 +112,7 @@ const report = await netgsm.report({ jobIds: jobId }); // aynı jobId dakikada b
 ```
 
 OTP için `sendOtp`: tek alıcı (`5…`, `05…` ya da `905…`, başına `+` eklenebilir); metin kırpılır ve ASCII'ye çevrilir. `503`'ü
-istemci kendisi tekrarlar. `mayHaveBeenQueued` ise (`500`) **yeni şifre göndermeyin**; kullanıcıya "kod
+istemci kendisi tekrarlar. `mayHaveBeenQueued` ise (`500`, `502` ya da yanıt alınamadı: `NETWORK_ERROR`) **yeni şifre göndermeyin**; kullanıcıya "kod
 gelmediyse tekrar isteyin" seçeneği sunun. Hesabınızda kurumsal OTP hizmeti tanımlıysa istemciyi
 `enterpriseOtp: true` ile oluşturun: `sendOtp` `x-client: enterprise` başlığını ekler. Diğer hesaplarda
 bu seçeneği açmayın; uyuşmazlık iki yönde de `403 FORBIDDEN` alır.
@@ -308,7 +312,8 @@ export class SmsService {
 
 Uzun süren toplu gönderimleri bir iş kuyruğundan (BullMQ gibi) çalıştırıyorsanız, kuyruğun kendi
 otomatik tekrarını `NetgsmApiError.mayHaveBeenQueued` ve `retryable: false` hatalarında kapatın: istemci
-güvenli tekrarları zaten yapar, kuyruğun körlemesine tekrarı `503` / `504` sonrası çift gönderim demektir.
+güvenli tekrarları zaten yapar, kuyruğun körlemesine tekrarı `503` / `504` ya da ağ hatası sonrası çift
+gönderim demektir.
 
 ## Mock'ta denemek
 

@@ -493,3 +493,86 @@ test('refresh beklenirken invalidate() çağrılırsa çökmez, yeniden giriş y
   assert.equal(await pending, 'a2');
   assert.deepEqual(calls, ['/auth/v3/token', '/auth/v3/token/refresh', '/auth/v3/token']);
 });
+
+// ---- Yanıt alınamayan istekler (ağ hatası, zaman aşımı, iptal): gönderimde belirsiz sonuç, tekrar yok
+
+/** Token isteğine yanıt verir; /sms/v3 isteklerinde `onSms`'i çağırır. Her çağrıyı `calls`'a yazar. */
+function fakeSms(onSms, { tokenFails = false } = {}) {
+  const calls = [];
+  const fetchImpl = async (input, init = {}) => {
+    const path = new URL(String(input)).pathname;
+    calls.push(`${init.method ?? 'GET'} ${path}`);
+    if (path === '/auth/v3/token') {
+      if (tokenFails) throw new TypeError('fetch failed');
+      return Response.json({ access_token: 't', refresh_token: '00000000-0000-4000-8000-000000000000', expires_in: 86400 });
+    }
+    return onSms(path, init);
+  };
+  const client = new NetgsmClient({ username: USERNAME, password: PASSWORD, baseUrl: 'http://127.0.0.1:9', fetch: fetchImpl });
+  return { client, calls, count: (k) => calls.filter(c => c === k).length };
+}
+
+const abortError = () => Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+const timeoutError = () => Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+
+test('gönderimde ağ hatası / zaman aşımı / iptal: NETWORK_ERROR, mayHaveBeenQueued true, retryable false, tek istek', async () => {
+  const sends = [
+    ['POST /sms/v3/send', (c) => c.send(SEND_BODY)],
+    ['POST /sms/v3/send/otp', (c) => c.sendOtp(OTP_BODY)],
+    ['POST /sms/v3/send/template', (c) => c.request('POST', '/send/template', { sender: 'MOCKTEST', template: 'x', recipients: [] })],
+    ['POST /sms/v3/directory/send', (c) => c.request('POST', '/directory/send', { sender: 'MOCKTEST', text: 'x', groupIds: [1] })],
+  ];
+  for (const [key, call] of sends) {
+    for (const makeError of [() => new TypeError('fetch failed'), abortError, timeoutError]) {
+      const { client, count } = fakeSms(async () => { throw makeError(); });
+      const err = await call(client).then(() => assert.fail('hata bekleniyordu'), e => e);
+      assert.ok(err instanceof NetgsmApiError, `${key}: NetgsmApiError olmalı`);
+      assert.equal(err.status, 0, key);
+      assert.equal(err.code, 'NETWORK_ERROR', key);
+      assert.equal(err.mayHaveBeenQueued, true, key);
+      assert.equal(err.retryable, false, key);
+      assert.match(err.message, /GET \/report/, key);
+      assert.ok(!err.message.includes(PASSWORD), 'şifre mesaja girmez');
+      assert.equal(count(key), 1, `${key} tekrar edilmemeli`);
+    }
+  }
+});
+
+test('okuma ve iptalde ağ hatası: NETWORK_ERROR, retryable true, mayHaveBeenQueued false, otomatik tekrar yok', async () => {
+  for (const [key, call] of [
+    ['GET /sms/v3/senders', (c) => c.request('GET', '/senders')],
+    ['GET /sms/v3/balance', (c) => c.getBalance()],
+    ['POST /sms/v3/cancel', (c) => c.request('POST', '/cancel', { jobId: '123' })],
+  ]) {
+    const { client, count } = fakeSms(async () => { throw new TypeError('fetch failed'); });
+    const err = await call(client).then(() => assert.fail('hata bekleniyordu'), e => e);
+    assert.ok(err instanceof NetgsmApiError, key);
+    assert.equal(err.code, 'NETWORK_ERROR', key);
+    assert.equal(err.retryable, true, key);
+    assert.equal(err.mayHaveBeenQueued, false, key);
+    assert.equal(count(key), 1, key);
+  }
+});
+
+test('gönderimde 2xx ama gövde okunamıyor: INVALID_RESPONSE, mayHaveBeenQueued true, tekrar yok', async () => {
+  const { client, count } = fakeSms(async () => new Response('<html>', { status: 202, headers: { 'X-Request-Id': 'c'.repeat(32) } }));
+  const err = await client.send(SEND_BODY).then(() => assert.fail('hata bekleniyordu'), e => e);
+  assert.ok(err instanceof NetgsmApiError);
+  assert.equal(err.status, 202);
+  assert.equal(err.code, 'INVALID_RESPONSE');
+  assert.equal(err.mayHaveBeenQueued, true);
+  assert.equal(err.retryable, false);
+  assert.equal(err.requestId, 'c'.repeat(32));
+  assert.equal(count('POST /sms/v3/send'), 1);
+});
+
+test('token isteğinde ağ hatası: gönderim yapılmaz; NETWORK_ERROR, retryable true, mayHaveBeenQueued false', async () => {
+  const { client, count } = fakeSms(async () => assert.fail('SMS isteği gitmemeli'), { tokenFails: true });
+  const err = await client.send(SEND_BODY).then(() => assert.fail('hata bekleniyordu'), e => e);
+  assert.ok(err instanceof NetgsmApiError);
+  assert.equal(err.code, 'NETWORK_ERROR');
+  assert.equal(err.status, 0);
+  assert.equal(err.retryable, true);
+  assert.equal(err.mayHaveBeenQueued, false);
+  assert.equal(count('POST /sms/v3/send'), 0);
+});
