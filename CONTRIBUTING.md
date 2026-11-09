@@ -99,9 +99,14 @@ Append the printed line to the digest file. The scan also runs on the zip conten
 
 `dist/<skill>.zip` is built for each skill. The zip root holds a directory named after the skill with
 `SKILL.md`, `references/`, `scripts/` (if any) and `LICENSE`. The output is deterministic (sorted files,
-fixed mtime). Zips are attached to GitHub Releases when a version is published.
+fixed mtime). The release workflow attaches them to each published GitHub Release (see Versioning).
 
 ## Versioning
 
 The plugin version is in `plugins/sms-skills/.claude-plugin/plugin.json`. Bump it when content or
 behaviour changes, and keep the manifest descriptions in line with the list of skills.
+
+To release, publish a GitHub Release whose tag is `v` plus the plugin version (for example `v1.0.0`).
+`.github/workflows/release.yml` checks the tag, runs the tests, builds the zips and attaches them to the
+release. The README links to `releases/latest/download/<skill>.zip`, so the newest release is what
+claude.ai users download.

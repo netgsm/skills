@@ -46,9 +46,13 @@ This installs both skills and two commands:
 
 ### claude.ai
 
-Upload `netgsm-sms.zip` and `netgsm-iys.zip` under **Settings → Capabilities → Skills**. Build the
-zips with `npm ci && npm run zip`; they are written to `dist/`. The mock does not run inside claude.ai;
-run it on your own machine.
+1. Download the skill zips from the [latest release](https://github.com/netgsm/skills/releases/latest):
+   [netgsm-sms.zip](https://github.com/netgsm/skills/releases/latest/download/netgsm-sms.zip) and
+   [netgsm-iys.zip](https://github.com/netgsm/skills/releases/latest/download/netgsm-iys.zip).
+2. Upload each zip under **Settings → Capabilities → Skills**.
+
+To build the zips from source instead, run `npm ci && npm run zip`; they are written to `dist/`. The mock
+does not run inside claude.ai; run it on your own machine.
 
 ### Other tools
 
