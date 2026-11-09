@@ -298,8 +298,8 @@ Senaryo gerektirmeyen hatalar, gerçek API'deki gibi yanlış girdiyle ya da tes
 
 | Hata | Nasıl |
 |---|---|
-| `401 UNAUTHENTICATED` | `Authorization` başlığı olmadan istek. |
-| `400 INVALID_REQUEST` | Eksik alan, örn. `{"sender":"MOCKTEST"}`. Türü uymayan değer (`"encoding":"turkish"`) tek ihlalle `1 field(s) rejected`; bozuk JSON `request body could not be read as json`. `GET /balance?service=x`. |
+| `401 UNAUTHENTICATED` | `Authorization` başlığı olmadan istek. Gerçek API'deki gibi token gövdeden önce denetlenir: token yoksa ya da geçersizse bozuk, boş ya da JSON olmayan gövde de `400`/`413`/`415` değil `401` alır (`/send/otp` hariç: orada bozuk JSON ve hatalı alanlar geçersiz token'dan önce `400` alır). |
+| `400 INVALID_REQUEST` | Eksik alan, örn. `{"sender":"MOCKTEST"}`. Türü uymayan değer (`"encoding":"turkish"`) tek ihlalle `1 field(s) rejected`; bozuk JSON ve boş gövde (`Content-Type` olmasa da) `request body could not be read as json`. Baştaki UTF-8 BOM hata değildir, atılır. `GET /balance?service=x`. |
 | `400 INVALID_SEND_WINDOW` | `/send`'de `startAt` 18 aydan daha ileride. |
 | `202` + `rejectedItems` | Bir kayıtta `+905061234567` (`INVALID_RECIPIENT`). |
 | `422 NO_DELIVERABLE_MESSAGES` | Bütün kayıtlar hatalı. |
